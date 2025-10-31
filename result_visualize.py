@@ -82,9 +82,181 @@ from PIL import Image
 import os
 import json
 from pathlib import Path
-from eval_metrics import SimilarityComputer
 import torch
 from tqdm import tqdm
+import pandas as pd
+import numpy as np
+import torchvision.transforms as transforms
+import torch.nn.functional as F
+from torchvision import models
+
+# Import face utilities for identity metrics
+try:
+    from model_face_utils import FaceDetector, FaceRecognizer
+    FACE_UTILS_AVAILABLE = True
+except ImportError:
+    FACE_UTILS_AVAILABLE = False
+
+
+class SimilarityComputer:
+    """
+    Compute similarity metrics between images for evaluation.
+    
+    This class computes three types of metrics:
+    1. SSIM: Structural Similarity Index (pixel-level similarity)
+    2. Perceptual Similarity: VGG-based feature similarity (semantic similarity)
+    3. Face Similarity: Face embedding similarity (identity preservation)
+    """
+    def __init__(self, device='cuda'):
+        """Initialize similarity computer with VGG for perceptual similarity."""
+        self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
+        
+        # ========================================
+        # Load VGG16 for perceptual similarity
+        # ========================================
+        self.vgg = models.vgg16(pretrained=True).features[:23].to(self.device).eval()
+        for param in self.vgg.parameters():
+            param.requires_grad = False
+        
+        # ========================================
+        # Initialize face recognition (optional)
+        # ========================================
+        self.face_detector = None
+        self.face_recognizer = None
+        if FACE_UTILS_AVAILABLE:
+            try:
+                self.face_detector = FaceDetector(device=self.device, keep_all=False)
+                self.face_recognizer = FaceRecognizer(device=self.device)
+            except Exception as e:
+                print(f"Warning: Could not initialize face recognition: {e}")
+        
+        # Image preprocessing for VGG
+        self.transform = transforms.Compose([
+            transforms.Resize((256, 256)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                               std=[0.229, 0.224, 0.225])
+        ])
+    
+    def compute_ssim(self, img1, img2):
+        """
+        Compute Structural Similarity Index (SSIM).
+        
+        SSIM measures structural similarity between images.
+        Range: [-1, 1], but typically [0, 1]
+        Higher = more similar structure
+        """
+        # Convert PIL images to numpy arrays
+        img1_np = np.array(img1).astype(np.float32) / 255.0
+        img2_np = np.array(img2).astype(np.float32) / 255.0
+        
+        # Simple SSIM computation (luminance channel)
+        C1 = (0.01 * 1) ** 2
+        C2 = (0.03 * 1) ** 2
+        
+        mu1 = img1_np.mean()
+        mu2 = img2_np.mean()
+        sigma1 = img1_np.var()
+        sigma2 = img2_np.var()
+        sigma12 = ((img1_np - mu1) * (img2_np - mu2)).mean()
+        
+        ssim = ((2 * mu1 * mu2 + C1) * (2 * sigma12 + C2)) / \
+               ((mu1**2 + mu2**2 + C1) * (sigma1 + sigma2 + C2))
+        
+        return float(ssim)
+    
+    def compute_perceptual_similarity(self, img1, img2):
+        """
+        Compute perceptual similarity using VGG features.
+        
+        This measures semantic similarity (how similar images look perceptually)
+        rather than pixel-level similarity.
+        """
+        # Preprocess images
+        img1_tensor = self.transform(img1).unsqueeze(0).to(self.device)
+        img2_tensor = self.transform(img2).unsqueeze(0).to(self.device)
+        
+        # Extract VGG features
+        with torch.no_grad():
+            feat1 = self.vgg(img1_tensor)
+            feat2 = self.vgg(img2_tensor)
+        
+        # Compute cosine similarity
+        feat1_flat = feat1.view(feat1.size(0), -1)
+        feat2_flat = feat2.view(feat2.size(0), -1)
+        
+        similarity = F.cosine_similarity(feat1_flat, feat2_flat)
+        
+        # Convert to [0, 1] range: (cosine + 1) / 2
+        similarity = (similarity + 1) / 2
+        
+        return float(similarity.cpu().item())
+    
+    def compute_face_similarity(self, img1, img2):
+        """
+        Compute face embedding similarity (identity preservation).
+        
+        This measures whether the same person's face is present in both images.
+        Returns None if faces not detected or face recognition not available.
+        """
+        if not FACE_UTILS_AVAILABLE or self.face_detector is None:
+            return None
+        
+        try:
+            # Convert PIL to torch tensor [0, 1]
+            img1_tensor = transforms.ToTensor()(img1).unsqueeze(0).to(self.device)
+            img2_tensor = transforms.ToTensor()(img2).unsqueeze(0).to(self.device)
+            
+            # Detect and extract faces
+            faces1, _, _ = self.face_detector.extract_faces(img1_tensor, target_size=160)
+            faces2, _, _ = self.face_detector.extract_faces(img2_tensor, target_size=160)
+            
+            # Check if faces detected
+            if faces1 is None or faces2 is None:
+                return None
+            
+            # Extract embeddings
+            emb1 = self.face_recognizer.extract_embeddings(faces1[[0]])  # First face
+            emb2 = self.face_recognizer.extract_embeddings(faces2[[0]])
+            
+            # Compute similarity
+            similarity = self.face_recognizer.compute_similarity(emb1, emb2)
+            
+            return float(similarity.cpu().item())
+        
+        except Exception as e:
+            return None
+    
+    def compute_all_metrics(self, img1_path, img2_path):
+        """
+        Compute all similarity metrics between two images.
+        
+        Args:
+            img1_path: Path to first image (original content)
+            img2_path: Path to second image (stylized)
+        
+        Returns:
+            dict with keys 'ssim', 'perceptual', 'face'
+        """
+        # Load images
+        img1 = Image.open(img1_path).convert('RGB')
+        img2 = Image.open(img2_path).convert('RGB')
+        
+        # Resize to same size for comparison
+        size = (256, 256)
+        img1 = img1.resize(size, Image.LANCZOS)
+        img2 = img2.resize(size, Image.LANCZOS)
+        
+        # Compute metrics
+        ssim = self.compute_ssim(img1, img2)
+        perceptual = self.compute_perceptual_similarity(img1, img2)
+        face = self.compute_face_similarity(img1, img2)
+        
+        return {
+            'ssim': ssim,
+            'perceptual': perceptual,
+            'face': face
+        }
 
 
 def create_comparison_with_metrics(content_path, style_path, baseline_path, 
@@ -473,6 +645,134 @@ def process_evaluation_images(content_dir, style_dir, baseline_dir, identity_dir
     return all_results
 
 
+def plot_training_curves(baseline_checkpoint_dir, identity_checkpoint_dir, output_dir):
+    """
+    Create a side-by-side comparison of training curves for baseline and identity models.
+    
+    This function loads the training_curves.csv files from both checkpoint directories
+    and creates a 2-subplot figure showing:
+    - Left: Baseline model (γ=0.0) training and validation loss
+    - Right: Identity-preserving model (γ=1.0) training and validation loss
+    
+    Args:
+        baseline_checkpoint_dir: Path to baseline model checkpoint directory
+                                (e.g., 'checkpoints/baseline_final/')
+        identity_checkpoint_dir: Path to identity model checkpoint directory
+                                (e.g., 'checkpoints/identity_final/')
+        output_dir: Directory to save the training curve comparison plot
+    
+    Returns:
+        str: Path to the saved plot
+    
+    Example:
+        plot_training_curves(
+            baseline_checkpoint_dir='checkpoints/baseline_final',
+            identity_checkpoint_dir='checkpoints/identity_final',
+            output_dir='results/eval_v2/comparisons'
+        )
+    """
+    # Construct paths to training curve CSV files
+    baseline_csv = Path(baseline_checkpoint_dir) / 'training_curves.csv'
+    identity_csv = Path(identity_checkpoint_dir) / 'training_curves.csv'
+    
+    # Check if both files exist
+    if not baseline_csv.exists() or not identity_csv.exists():
+        print(f"\n⚠️  Training curves not found. Skipping training curve plot.")
+        if not baseline_csv.exists():
+            print(f"   Missing: {baseline_csv}")
+        if not identity_csv.exists():
+            print(f"   Missing: {identity_csv}")
+        return None
+    
+    print(f"\n{'='*60}")
+    print("Creating Training Curve Comparison")
+    print('='*60)
+    
+    # Load data
+    baseline_df = pd.read_csv(baseline_csv)
+    identity_df = pd.read_csv(identity_csv)
+    
+    # Create figure with 2 subplots side by side
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+    
+    # ========================================
+    # Left subplot: Baseline Model (γ=0.0)
+    # ========================================
+    ax1.plot(baseline_df['epoch'], baseline_df['train_loss'], 
+             'b-o', linewidth=2, markersize=6, label='Train Loss', alpha=0.8)
+    ax1.plot(baseline_df['epoch'], baseline_df['val_loss'], 
+             'r-s', linewidth=2, markersize=6, label='Val Loss', alpha=0.8)
+    
+    ax1.set_xlabel('Epoch', fontsize=12, fontweight='bold')
+    ax1.set_ylabel('Loss', fontsize=12, fontweight='bold')
+    ax1.set_title('Baseline Model (γ=0.0)\nNo Identity Preservation', 
+                  fontsize=14, fontweight='bold', pad=15)
+    ax1.legend(fontsize=11, loc='upper right')
+    ax1.grid(True, alpha=0.3, linestyle='--')
+    ax1.set_xlim(0, baseline_df['epoch'].max() + 1)
+    
+    # Add final loss annotations
+    final_train = baseline_df['train_loss'].iloc[-1]
+    final_val = baseline_df['val_loss'].iloc[-1]
+    ax1.text(0.02, 0.98, f'Final Train Loss: {final_train:.4f}\nFinal Val Loss: {final_val:.4f}',
+             transform=ax1.transAxes, fontsize=10, verticalalignment='top',
+             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    
+    # ========================================
+    # Right subplot: Identity Model (γ=1.0)
+    # ========================================
+    ax2.plot(identity_df['epoch'], identity_df['train_loss'], 
+             'b-o', linewidth=2, markersize=6, label='Train Loss', alpha=0.8)
+    ax2.plot(identity_df['epoch'], identity_df['val_loss'], 
+             'r-s', linewidth=2, markersize=6, label='Val Loss', alpha=0.8)
+    
+    ax2.set_xlabel('Epoch', fontsize=12, fontweight='bold')
+    ax2.set_ylabel('Loss', fontsize=12, fontweight='bold')
+    ax2.set_title('Identity-Preserving Model (γ=1.0)\nWith Identity Loss', 
+                  fontsize=14, fontweight='bold', pad=15)
+    ax2.legend(fontsize=11, loc='upper right')
+    ax2.grid(True, alpha=0.3, linestyle='--')
+    ax2.set_xlim(0, identity_df['epoch'].max() + 1)
+    
+    # Add final loss annotations
+    final_train = identity_df['train_loss'].iloc[-1]
+    final_val = identity_df['val_loss'].iloc[-1]
+    ax2.text(0.02, 0.98, f'Final Train Loss: {final_train:.4f}\nFinal Val Loss: {final_val:.4f}',
+             transform=ax2.transAxes, fontsize=10, verticalalignment='top',
+             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    
+    # ========================================
+    # Main title
+    # ========================================
+    fig.suptitle('Training Curve Comparison: Baseline vs Identity-Preserving Model', 
+                 fontsize=16, fontweight='bold', y=0.98)
+    
+    # Adjust layout and save
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    
+    output_path = Path(output_dir) / 'training_curves_comparison.png'
+    plt.savefig(output_path, dpi=300, bbox_inches='tight', facecolor='white')
+    plt.close()
+    
+    print(f"\n✓ Training curves comparison saved to: {output_path}")
+    
+    # Print summary statistics
+    print(f"\nBaseline Model (γ=0.0):")
+    print(f"  Initial Train Loss: {baseline_df['train_loss'].iloc[0]:.4f}")
+    print(f"  Final Train Loss: {baseline_df['train_loss'].iloc[-1]:.4f}")
+    print(f"  Best Val Loss: {baseline_df['val_loss'].min():.4f} (Epoch {baseline_df['val_loss'].idxmin() + 1})")
+    print(f"  Final Val Loss: {baseline_df['val_loss'].iloc[-1]:.4f}")
+    
+    print(f"\nIdentity-Preserving Model (γ=1.0):")
+    print(f"  Initial Train Loss: {identity_df['train_loss'].iloc[0]:.4f}")
+    print(f"  Final Train Loss: {identity_df['train_loss'].iloc[-1]:.4f}")
+    print(f"  Best Val Loss: {identity_df['val_loss'].min():.4f} (Epoch {identity_df['val_loss'].idxmin() + 1})")
+    print(f"  Final Val Loss: {identity_df['val_loss'].iloc[-1]:.4f}")
+    print("="*60)
+    
+    return str(output_path)
+
+
 if __name__ == "__main__":
     """
     Command-line interface for creating comparison grids.
@@ -565,7 +865,11 @@ REQUIREMENTS:
     parser.add_argument('--identity-dir', type=str, default='results/eval_identity',
                         help='Directory with identity-preserving model results (γ=1.0)')
     parser.add_argument('--output-dir', type=str, default='results/eval_comparisons',
-                        help='Directory to save comparison grids')
+                        help='Directory to save comparison grids and training curves')
+    parser.add_argument('--baseline-checkpoint', type=str, default='checkpoints/baseline_final',
+                        help='Baseline model checkpoint directory (for training curves)')
+    parser.add_argument('--identity-checkpoint', type=str, default='checkpoints/identity_final',
+                        help='Identity model checkpoint directory (for training curves)')
     
     args = parser.parse_args()
     
@@ -577,6 +881,15 @@ REQUIREMENTS:
         style_dir=args.style_dir,
         baseline_dir=args.baseline_dir,
         identity_dir=args.identity_dir,
+        output_dir=args.output_dir
+    )
+    
+    # ========================================
+    # Generate Training Curve Comparison
+    # ========================================
+    plot_training_curves(
+        baseline_checkpoint_dir=args.baseline_checkpoint,
+        identity_checkpoint_dir=args.identity_checkpoint,
         output_dir=args.output_dir
     )
 

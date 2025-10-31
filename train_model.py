@@ -44,26 +44,38 @@ After training, the decoder can reconstruct stylized images that:
 ✓ Look visually pleasing (no artifacts, natural-looking)
 
 TYPICAL USAGE:
-    # Basic training (baseline, no identity preservation)
+    # Train baseline model (exhaustive pairing, no identity preservation)
     python train_model.py \\
         --content-dir data/content \\
         --style-dir data/style \\
+        --checkpoint-dir checkpoints/baseline \\
         --epochs 20 \\
-        --batch-size 8
+        --identity-weight 0.0
     
-    # Advanced training (with identity preservation for faces)
+    # Train identity-preserving model (CS230 60/20/20 splits)
     python train_model.py \\
         --content-dir data/content \\
         --style-dir data/style \\
+        --checkpoint-dir checkpoints/identity \\
         --epochs 20 \\
-        --batch-size 8 \\
         --identity-weight 0.1
     
-    # Resume from checkpoint
+    # Fast training with larger batch (if GPUs are clean)
     python train_model.py \\
         --content-dir data/content \\
         --style-dir data/style \\
-        --resume checkpoints/checkpoint_epoch_10.pth
+        --checkpoint-dir checkpoints/identity_fast \\
+        --epochs 20 \\
+        --batch-size 64 \\
+        --identity-weight 0.1
+    
+    # Custom split files (default: data/content_splits/train.txt and val.txt)
+    python train_model.py \\
+        --content-dir data/content \\
+        --style-dir data/style \\
+        --split-file data/content_splits/train.txt \\
+        --val-split-file data/content_splits/val.txt \\
+        --epochs 10
 
 EXPECTED RESULTS:
 - After 10 epochs: Basic stylization working, some artifacts
@@ -99,35 +111,38 @@ class ImageDataset(Dataset):
     """
     Dataset for loading content and style image pairs for AdaIN training.
     
-    KEY DESIGN CHOICE - RANDOM PAIRING:
-    During training, we randomly pair content images with style images!
-    This teaches the decoder to handle arbitrary style transfer.
+    KEY DESIGN CHOICE - EXHAUSTIVE PAIRING:
+    We now iterate through ALL unique content×style combinations per epoch!
+    This provides reproducible training curves essential for DL experiments.
     
-    Example:
-        - Epoch 1, Batch 1: face_001.jpg + starry_night.jpg
-        - Epoch 1, Batch 2: face_002.jpg + peter_rabbit.jpg
-        - Epoch 2, Batch 1: face_001.jpg + the_scream.jpg  (different style!)
+    Example with 3 content images and 2 styles (6 total pairs per epoch):
+        - Batch 1: face_001.jpg + starry_night.jpg, face_001.jpg + peter_rabbit.jpg
+        - Batch 2: face_002.jpg + starry_night.jpg, face_002.jpg + peter_rabbit.jpg
+        - Batch 3: face_003.jpg + starry_night.jpg, face_003.jpg + peter_rabbit.jpg
     
-    This random pairing is crucial because:
-    ✓ Prevents overfitting to specific content-style combinations
-    ✓ Enables arbitrary style transfer (any content + any style)
-    ✓ Maximizes dataset diversity (N×M combinations from N content + M styles)
+    Exhaustive pairing benefits:
+    ✓ Reproducible training curves (essential for milestone reports)
+    ✓ Consistent epoch definition (all data seen once per epoch)
+    ✓ Better for small datasets (maximize data usage)
+    ✓ Easier to judge convergence and overfitting
+    
+    With splits (train/val/test):
+    - Train: 120 content × 21 styles = 2,520 pairs per epoch
+    - Val: 40 content × 21 styles = 840 pairs for validation
+    - Test: 40 content × 21 styles = 840 pairs for testing
     
     DATASET REQUIREMENTS:
     - Content images: Natural photos (faces, objects, scenes)
-      Examples: CelebA faces, COCO objects, MS-COCO scenes
-      For our project: Synthetic children's faces from ThisPersonDoesNotExist
+      For our project: Synthetic children's faces from StyleGAN
     
     - Style images: Artistic images with distinct visual styles
-      Examples: Famous paintings, watercolors, sketches
-      For our project: Peter Rabbit, Kate Greenaway, etc.
+      For our project: Famous paintings + children's book illustrations
     
     TRANSFORMS APPLIED:
     1. Resize to square (e.g., 256×256) - ensures consistent size
-    2. RandomCrop (during training) - data augmentation
-    3. ToTensor - converts PIL Image to PyTorch tensor [0,1]
+    2. ToTensor - converts PIL Image to PyTorch tensor [0,1]
     """
-    def __init__(self, content_dir, style_dir, transform=None, image_size=256):
+    def __init__(self, content_dir, style_dir, split_file=None, transform=None, image_size=256):
         """
         Initialize dataset by loading image paths.
         
@@ -136,40 +151,66 @@ class ImageDataset(Dataset):
                         Example: 'data/content/' with face_00000.jpg, face_00001.jpg, ...
             style_dir: Directory containing style images
                       Example: 'data/style/' with starry_night.jpg, peter_rabbit.jpg, ...
+            split_file: Optional path to .txt file listing which content images to use
+                       Example: 'data/content_splits/train.txt' with one filename per line
+                       If None, uses all images in content_dir
             transform: Optional custom transform (if None, uses default)
             image_size: Size to resize images to (default: 256×256)
                        Larger = better quality but slower training and more VRAM
                        Smaller = faster training but lower quality
         
         Example:
-            # Create dataset for training
+            # Create dataset for training with split file
             dataset = ImageDataset(
                 content_dir='data/content',
                 style_dir='data/style',
+                split_file='data/content_splits/train.txt',
                 image_size=256
             )
             
-            # Create dataloader
-            loader = DataLoader(dataset, batch_size=8, shuffle=True)
+            # Create dataloader (no shuffle needed - pairs are deterministic)
+            loader = DataLoader(dataset, batch_size=8, shuffle=False)
         """
         self.content_dir = Path(content_dir)
         self.style_dir = Path(style_dir)
+        self.split_file = split_file
         
         # ========================================
-        # Load all image file paths
+        # Load content images (from split file or directory)
         # ========================================
-        self.content_images = self._get_image_files(self.content_dir)
+        if split_file:
+            # Load from split file
+            with open(split_file, 'r') as f:
+                filenames = [line.strip() for line in f if line.strip()]
+            self.content_images = [self.content_dir / filename for filename in filenames]
+            print(f"Loaded {len(self.content_images)} content images from split file")
+        else:
+            # Load all images from directory
+            self.content_images = self._get_image_files(self.content_dir)
+            print(f"Found {len(self.content_images)} content images")
+        
+        # ========================================
+        # Load all style images
+        # ========================================
         self.style_images = self._get_image_files(self.style_dir)
-        
-        # Report dataset sizes
-        print(f"Found {len(self.content_images)} content images")
         print(f"Found {len(self.style_images)} style images")
+        
+        # ========================================
+        # Create exhaustive pairing
+        # ========================================
+        # Generate ALL content×style combinations
+        self.pairs = []
+        for content_img in self.content_images:
+            for style_img in self.style_images:
+                self.pairs.append((content_img, style_img))
+        
+        print(f"Total pairs: {len(self.pairs)} ({len(self.content_images)} content × {len(self.style_images)} styles)")
         
         # ========================================
         # Validate dataset
         # ========================================
         if len(self.content_images) == 0:
-            raise ValueError(f"No images found in content directory: {content_dir}")
+            raise ValueError(f"No images found for content")
         if len(self.style_images) == 0:
             raise ValueError(f"No images found in style directory: {style_dir}")
         
@@ -179,15 +220,10 @@ class ImageDataset(Dataset):
         if transform is None:
             # Default transform pipeline for training
             self.transform = transforms.Compose([
-                # Step 1: Resize to target size (maintaining aspect ratio is not critical)
+                # Step 1: Resize to target size
                 transforms.Resize((image_size, image_size)),
                 
-                # Step 2: Random crop for data augmentation (helps prevent overfitting)
-                # Note: Since we already resized to exact size, this is a no-op
-                # but kept for compatibility if you want larger resize + crop
-                transforms.RandomCrop(image_size),
-                
-                # Step 3: Convert PIL Image to PyTorch tensor in [0, 1] range
+                # Step 2: Convert PIL Image to PyTorch tensor in [0, 1] range
                 # This also reorders from (H, W, C) to (C, H, W)
                 transforms.ToTensor(),
             ])
@@ -233,54 +269,49 @@ class ImageDataset(Dataset):
         """
         Return the number of training samples.
         
-        Since we randomly pair content with styles, the effective dataset
-        size is len(content_images), with each content image paired with
-        a different random style each epoch.
+        With exhaustive pairing, this is content_count × style_count.
+        Example: 120 content × 21 styles = 2,520 pairs per epoch
         """
-        return len(self.content_images)
+        return len(self.pairs)
     
     def __getitem__(self, idx):
         """
         Get a content-style pair for training - THE KEY METHOD!
         
-        IMPORTANT: Style images are chosen RANDOMLY!
-        This is not a bug - it's intentional for arbitrary style transfer.
+        IMPORTANT: Pairs are now deterministic (exhaustive pairing)!
+        Same idx always returns the same content-style combination.
         
         Process:
-        1. Load content image at index idx (sequential access)
-        2. Load RANDOM style image (random access)
+        1. Get content-style pair from pre-generated pairs list (deterministic)
+        2. Load both images from disk
         3. Apply transforms to both
         4. Return as tensor pair
         
         Args:
-            idx: Index of content image to load (0 to len(content_images)-1)
+            idx: Index of pair to load (0 to len(pairs)-1)
         
         Returns:
             content_tensor: (3, H, W) tensor of content image in [0, 1]
             style_tensor: (3, H, W) tensor of style image in [0, 1]
         
         Example:
-            dataset = ImageDataset('data/content', 'data/style')
-            content, style = dataset[0]
+            dataset = ImageDataset('data/content', 'data/style', 
+                                  split_file='data/content_splits/train.txt')
+            content, style = dataset[0]  # First pair, always the same
             
             print(content.shape)  # torch.Size([3, 256, 256])
             print(style.shape)    # torch.Size([3, 256, 256])
             print(content.min(), content.max())  # 0.0, 1.0
         """
         # ========================================
-        # Load content image (sequential)
+        # Get deterministic content-style pair
         # ========================================
-        content_path = self.content_images[idx]
-        content_img = Image.open(content_path).convert('RGB')
-        # convert('RGB') ensures 3 channels (handles grayscale, RGBA, etc.)
+        content_path, style_path = self.pairs[idx]
         
-        # ========================================
-        # Load random style image
-        # ========================================
-        # Pick a random style image (different each time for same idx!)
-        style_idx = random.randint(0, len(self.style_images) - 1)
-        style_path = self.style_images[style_idx]
+        # Load both images
+        content_img = Image.open(content_path).convert('RGB')
         style_img = Image.open(style_path).convert('RGB')
+        # convert('RGB') ensures 3 channels (handles grayscale, RGBA, etc.)
         
         # ========================================
         # Apply transforms (resize, crop, to tensor)
@@ -622,7 +653,6 @@ def main():
             --content-dir data/content \\
             --style-dir data/style \\
             --epochs 20 \\
-            --batch-size 8 \\
             --identity-weight 0.1
     """
     # ============================================================================
@@ -645,13 +675,19 @@ def main():
     parser.add_argument('--val-style-dir', type=str, default=None,
                         help='Directory containing validation style images (optional)')
     
+    # Split file arguments (for train/val/test splits)
+    parser.add_argument('--split-file', type=str, default='data/content_splits/train.txt',
+                        help='Path to training split file listing content images to use')
+    parser.add_argument('--val-split-file', type=str, default='data/content_splits/val.txt',
+                        help='Path to validation split file listing content images to use')
+    
     # ========================================
     # Training hyperparameters
     # ========================================
     parser.add_argument('--epochs', type=int, default=20,
                         help='Number of training epochs (20 is typical)')
-    parser.add_argument('--batch-size', type=int, default=8,
-                        help='Batch size (8 works for 8GB GPU, use 4 for 4GB GPU)')
+    parser.add_argument('--batch-size', type=int, default=32,
+                        help='Batch size (32 safe for dual A6000, up to 64 if GPUs are clean, 8 for smaller GPUs)')
     parser.add_argument('--learning-rate', type=float, default=1e-4,
                         help='Learning rate for Adam optimizer')
     parser.add_argument('--content-weight', type=float, default=1.0,
@@ -729,6 +765,7 @@ def main():
     train_dataset = ImageDataset(
         content_dir=args.content_dir,
         style_dir=args.style_dir,
+        split_file=args.split_file,  # Use train split
         image_size=args.image_size
     )
     
@@ -741,23 +778,23 @@ def main():
     )
     
     # ========================================
-    # Optional validation dataset and dataloader
+    # Validation dataset and dataloader (using val split file)
     # ========================================
-    val_loader = None
-    if args.val_content_dir and args.val_style_dir:
-        print(f"\nLoading validation dataset...")
-        val_dataset = ImageDataset(
-            content_dir=args.val_content_dir,
-            style_dir=args.val_style_dir,
-            image_size=args.image_size
-        )
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=args.batch_size,
-            shuffle=False,             # Don't shuffle validation
-            num_workers=args.num_workers,
-            pin_memory=True
-        )
+    print(f"\nLoading validation dataset...")
+    val_dataset = ImageDataset(
+        content_dir=args.content_dir,  # Same directory, different split
+        style_dir=args.style_dir,
+        split_file=args.val_split_file,  # Use val split
+        image_size=args.image_size
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,             # Don't shuffle validation (deterministic for curves)
+        num_workers=args.num_workers,
+        pin_memory=True
+    )
+    print(f"Validation pairs: {len(val_dataset)}")
     
     # ============================================================================
     # MODEL CREATION
@@ -770,7 +807,7 @@ def main():
     # Create AdaIN Style Transfer model
     # ========================================
     model = AdaINStyleTransfer(device=device)
-    print("✓ Model created")
+    print(f"✓ Model created and moved to {device}")
     
     # ========================================
     # Count parameters
@@ -841,6 +878,18 @@ def main():
     best_val_loss = float('inf')
     
     # ========================================
+    # Setup CSV logging for training curves
+    # ========================================
+    csv_path = os.path.join(args.checkpoint_dir, 'training_curves.csv')
+    csv_file = open(csv_path, 'w')
+    csv_header = 'epoch,train_loss,train_content,train_style,val_loss,val_content,val_style'
+    if args.identity_weight > 0:
+        csv_header += ',train_identity,train_similarity,val_identity,val_similarity'
+    csv_file.write(csv_header + '\n')
+    csv_file.flush()  # Ensure header is written immediately
+    print(f"✓ Training curves will be saved to: {csv_path}\n")
+    
+    # ========================================
     # Main training loop
     # ========================================
     for epoch in range(start_epoch, args.epochs):
@@ -869,34 +918,35 @@ def main():
         print(train_stats)
         
         # ========================================
-        # Validation phase (if validation set provided)
+        # Validation phase (always run for proper training curves)
         # ========================================
-        if val_loader:
-            val_loss, val_content_loss, val_style_loss, val_identity_loss, val_similarity = validate(
-                model=model,
-                dataloader=val_loader,
-                device=device,
-                content_weight=args.content_weight,
-                style_weight=args.style_weight,
-                identity_weight=args.identity_weight,
-                identity_preserver=identity_preserver
-            )
-            
-            # Print validation statistics
-            val_stats = f"Val Loss: {val_loss:.4f} (Content: {val_content_loss:.4f}, Style: {val_style_loss:.4f}"
-            if args.identity_weight > 0:
-                val_stats += f", Identity: {val_identity_loss:.4f}, Similarity: {val_similarity:.4f}"
-            val_stats += ")"
-            print(val_stats)
-            
-            # ========================================
-            # Save best model based on validation loss
-            # ========================================
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                checkpoint_path = os.path.join(args.checkpoint_dir, 'best_model.pth')
-                save_checkpoint(model, optimizer, epoch, val_loss, checkpoint_path)
-                print(f"✓ New best model saved (val_loss: {val_loss:.4f})")
+        val_loss, val_content_loss, val_style_loss, val_identity_loss, val_similarity = validate(
+            model=model,
+            dataloader=val_loader,
+            device=device,
+            content_weight=args.content_weight,
+            style_weight=args.style_weight,
+            identity_weight=args.identity_weight,
+            identity_preserver=identity_preserver
+        )
+        
+        # Print validation statistics
+        val_stats = f"Val Loss: {val_loss:.4f} (Content: {val_content_loss:.4f}, Style: {val_style_loss:.4f}"
+        if args.identity_weight > 0:
+            val_stats += f", Identity: {val_identity_loss:.4f}, Similarity: {val_similarity:.4f}"
+        val_stats += ")"
+        print(val_stats)
+        
+        # ========================================
+        # Log to CSV for training curves
+        # ========================================
+        csv_line = f"{epoch+1},{train_loss:.6f},{train_content_loss:.6f},{train_style_loss:.6f},"
+        csv_line += f"{val_loss:.6f},{val_content_loss:.6f},{val_style_loss:.6f}"
+        if args.identity_weight > 0:
+            csv_line += f",{train_identity_loss:.6f},{train_similarity:.6f},"
+            csv_line += f"{val_identity_loss:.6f},{val_similarity:.6f}"
+        csv_file.write(csv_line + '\n')
+        csv_file.flush()  # Ensure data is written immediately
         
         # ========================================
         # Save periodic checkpoint
@@ -910,6 +960,12 @@ def main():
     # ========================================
     final_checkpoint_path = os.path.join(args.checkpoint_dir, 'final_model.pth')
     save_checkpoint(model, optimizer, args.epochs - 1, train_loss, final_checkpoint_path)
+    
+    # ========================================
+    # Close CSV file
+    # ========================================
+    csv_file.close()
+    print(f"\n✓ Training curves saved to: {csv_path}")
     
     # ============================================================================
     # TRAINING COMPLETE!

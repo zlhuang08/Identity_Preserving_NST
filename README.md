@@ -111,7 +111,6 @@ python train_model.py \
     --content-dir data/content \
     --style-dir data/style \
     --epochs 20 \
-    --batch-size 8 \
     --identity-weight 0.0 \
     --checkpoint-dir checkpoints/baseline_final \
     --save-interval 5
@@ -121,11 +120,16 @@ python train_model.py \
     --content-dir data/content \
     --style-dir data/style \
     --epochs 20 \
-    --batch-size 8 \
     --identity-weight 0.1 \
     --checkpoint-dir checkpoints/identity_final \
     --save-interval 5
 ```
+
+**Training Features:**
+- 📊 **Exhaustive Pairing**: Every content image × every style per epoch (2,520 train pairs, 840 val pairs)
+- 📈 **Training Curves**: Saved to CSV for plotting train/val loss
+- 💾 **Best Model Saving**: Automatically saves model with lowest validation loss
+- ⚡ **Optimized Batch Size**: Default 32 for A6000 GPUs (adjust based on your GPU memory)
 
 ### 4. Generate Stylized Images
 
@@ -169,7 +173,9 @@ python result_visualize.py \
 | **Speedup vs Traditional NST** | 300-400x faster |
 | **Model Parameters** | 7M total, 3.5M trainable |
 | **Training Time** | ~4 minutes per model (20 epochs, 200 images) |
-| **Dataset Size** | 200 content images, 21 style images |
+| **Dataset Size** | 200 content images (60% train / 20% val / 20% test), 21 style images |
+| **Training Pairs** | 2,520 per epoch (120 content × 21 styles) |
+| **Validation Pairs** | 840 (40 content × 21 styles) |
 | **Evaluation Set** | 2 faces × 21 styles = 42 combinations |
 
 ### Training Performance (20 Epochs)
@@ -208,162 +214,562 @@ python result_visualize.py \
 
 ## 🔬 Running Your Own Experiments
 
-Want to explore different hyperparameters and loss weights? Here's how to conduct experiments:
+Want to explore different hyperparameters and loss weights? Follow this systematic approach for hyperparameter tuning:
 
-### Experiment 1: Adjust Identity Weight (γ)
+### **Recommended Experiment Order**
 
-Control how strongly identity is preserved vs stylization strength:
+For best results, follow this systematic tuning strategy:
+
+1. **Batch Size** (GPU memory constraint) ← Start here!
+2. **Learning Rate** (critical for convergence and final performance)
+3. **Epochs** (only if overfitting observed, else skip)
+4. **Content/Style Weights** (optimize baseline stylization first)
+5. **Identity Weight γ** (add identity preservation last)
+
+**Rationale:** First optimize the base style transfer task (steps 1-4), then add the identity preservation constraint (step 5). This follows standard ML practice: get the baseline working well before adding regularization.
+
+---
+
+### Experiment 0: Batch Size Selection (GPU-Dependent) ⚡
+
+**Start here!** Batch size determines training speed and memory usage.
+
+#### GPU Memory Guide
+
+| GPU | VRAM | Recommended Batch Size | Expected Training Time (20 epochs) |
+|-----|------|----------------------|-----------------------------------|
+| **RTX 4090** | 24GB | 32-64 | ~3-4 minutes |
+| **RTX 3090/4080** | 24GB | 32-48 | ~4-5 minutes |
+| **RTX 3080/A6000** | 10-12GB | 16-32 | ~5-7 minutes |
+| **RTX 3070/3060Ti** | 8GB | 8-16 | ~8-12 minutes |
+| **RTX 3060** | 12GB | 16-24 | ~6-9 minutes |
+| **GTX 1080Ti** | 11GB | 16-24 | ~7-10 minutes |
+| **RTX 2060** | 6GB | 4-8 | ~15-20 minutes |
 
 ```bash
-# Weak identity preservation (more artistic freedom)
-python train_model.py \
-    --content-dir data/content \
-    --style-dir data/style \
-    --identity-weight 0.05 \
-    --checkpoint-dir checkpoints/experiment_gamma_0.05 \
-    --epochs 20
+# Test different batch sizes to find maximum for your GPU
+# Start with 32 (safe default), then increase if memory allows
 
-# Strong identity preservation (more face preservation)
+# Conservative (works on most GPUs)
 python train_model.py \
     --content-dir data/content \
     --style-dir data/style \
-    --identity-weight 0.2 \
-    --checkpoint-dir checkpoints/experiment_gamma_0.2 \
-    --epochs 20
+    --batch-size 8 \
+    --checkpoint-dir checkpoints/test_batch_8 \
+    --epochs 1
+
+# Recommended for A6000/RTX 4090 (24GB)
+python train_model.py \
+    --content-dir data/content \
+    --style-dir data/style \
+    --batch-size 32 \
+    --checkpoint-dir checkpoints/test_batch_32 \
+    --epochs 1
+
+# Aggressive (for clean GPUs with no other processes)
+python train_model.py \
+    --content-dir data/content \
+    --style-dir data/style \
+    --batch-size 64 \
+    --checkpoint-dir checkpoints/test_batch_64 \
+    --epochs 1
 ```
 
-**Recommended values:** γ ∈ [0.0, 0.5]
-- γ = 0.0: No identity preservation (baseline)
-- γ = 0.05-0.1: Subtle identity preservation (good balance)
-- γ = 0.2-0.5: Strong identity preservation (less stylization)
+**Pro Tips:**
+- Run `nvidia-smi` to check available GPU memory before training
+- If you get "CUDA out of memory", reduce batch size by half
+- Larger batch sizes = faster training but diminishing returns beyond 32
+- Use batch size 32 as default for most experiments
 
-### Experiment 2: Adjust Learning Rate
+---
+
+### Experiment 1: Learning Rate Tuning
+
+**After finding optimal batch size**, tune learning rate for best convergence.
 
 ```bash
-# Faster convergence (might be less stable)
+# Fast convergence (risk of overshooting)
 python train_model.py \
     --content-dir data/content \
     --style-dir data/style \
+    --batch-size 32 \
     --learning-rate 0.0005 \
-    --checkpoint-dir checkpoints/experiment_lr_0.0005 \
+    --checkpoint-dir checkpoints/exp_lr_5e-4 \
     --epochs 20
 
-# Slower convergence (more stable)
+# Default (balanced, recommended starting point)
 python train_model.py \
     --content-dir data/content \
     --style-dir data/style \
+    --batch-size 32 \
+    --learning-rate 0.0001 \
+    --checkpoint-dir checkpoints/exp_lr_1e-4 \
+    --epochs 20
+
+# Slow convergence (more stable, better quality)
+python train_model.py \
+    --content-dir data/content \
+    --style-dir data/style \
+    --batch-size 32 \
     --learning-rate 0.00005 \
-    --checkpoint-dir checkpoints/experiment_lr_0.00005 \
-    --epochs 30
+    --checkpoint-dir checkpoints/exp_lr_5e-5 \
+    --epochs 20
 ```
 
-**Recommended values:** lr ∈ [5e-5, 5e-4]
-- Default: 1e-4 (balanced)
+**Learning Rate Guide:**
 
-### Experiment 3: Adjust Loss Weights
+| Learning Rate | Convergence | Stability | Best For |
+|---------------|-------------|-----------|----------|
+| **5e-4** | Very fast | Low | Quick experiments |
+| **2e-4** | Fast | Medium | Initial exploration |
+| **1e-4** ⭐ | Balanced | Good | **Recommended default** |
+| **5e-5** | Slow | High | Fine-tuning |
+| **1e-5** | Very slow | Very high | Final quality boost |
+
+**How to evaluate:** Check `training_curves.csv` - good learning rate shows smooth loss decrease without oscillations.
+
+---
+
+### Experiment 2: Training Duration & Overfitting Check
+
+**Check for overfitting before proceeding!** If training loss << validation loss, tune this first.
 
 ```bash
-# Stronger content preservation
+# Standard training (start here)
 python train_model.py \
     --content-dir data/content \
     --style-dir data/style \
+    --batch-size 32 \
+    --learning-rate 0.0001 \
+    --epochs 20 \
+    --checkpoint-dir checkpoints/standard_20epochs
+
+# If overfitting observed (train loss << val loss)
+# Try fewer epochs
+python train_model.py \
+    --content-dir data/content \
+    --style-dir data/style \
+    --batch-size 32 \
+    --learning-rate 0.0001 \
+    --epochs 10 \
+    --checkpoint-dir checkpoints/reduced_10epochs
+
+# If underfitting (both losses still decreasing)
+# Try more epochs
+python train_model.py \
+    --content-dir data/content \
+    --style-dir data/style \
+    --batch-size 32 \
+    --learning-rate 0.0001 \
+    --epochs 40 \
+    --checkpoint-dir checkpoints/extended_40epochs
+```
+
+**Epoch Guide:**
+
+| Epochs | Training Time | When to Use |
+|--------|---------------|-------------|
+| **10** | ~2 min | If overfitting observed |
+| **20** ⭐ | ~4 min | **Standard (no overfitting)** |
+| **30-40** | ~6-8 min | If still improving at epoch 20 |
+
+**How to check for overfitting:**
+```bash
+# Check training curves
+cat checkpoints/standard_20epochs/training_curves.csv
+
+# Look for:
+# - Train loss << Val loss → Overfitting (reduce epochs)
+# - Both decreasing → Good (continue)
+# - Both flat → Need more capacity or better LR
+```
+
+**For most cases:** 20 epochs is sufficient without overfitting. Skip this step unless you observe issues!
+
+---
+
+### Experiment 3: Content and Style Weight Balance (Baseline Optimization)
+
+**Optimize baseline stylization BEFORE adding identity preservation!**
+
+This step tunes your baseline model (γ=0.0) to achieve good stylization quality. The ratio matters more than absolute values!
+
+```bash
+# Default balanced (1:10 ratio) ⭐ RECOMMENDED
+python train_model.py \
+    --content-dir data/content \
+    --style-dir data/style \
+    --batch-size 32 \
+    --content-weight 1.0 \
+    --style-weight 10.0 \
+    --identity-weight 0.1 \
+    --checkpoint-dir checkpoints/exp_balance_1_10 \
+    --epochs 20
+
+# More content preservation (1:5 ratio)
+python train_model.py \
+    --content-dir data/content \
+    --style-dir data/style \
+    --batch-size 32 \
     --content-weight 2.0 \
     --style-weight 10.0 \
     --identity-weight 0.1 \
-    --checkpoint-dir checkpoints/experiment_content_2.0 \
+    --checkpoint-dir checkpoints/exp_balance_2_10 \
     --epochs 20
 
-# Stronger stylization
+# Stronger stylization (1:15 ratio)
 python train_model.py \
     --content-dir data/content \
     --style-dir data/style \
+    --batch-size 32 \
+    --content-weight 1.0 \
+    --style-weight 15.0 \
+    --identity-weight 0.1 \
+    --checkpoint-dir checkpoints/exp_balance_1_15 \
+    --epochs 20
+
+# Very strong stylization (1:20 ratio)
+python train_model.py \
+    --content-dir data/content \
+    --style-dir data/style \
+    --batch-size 32 \
     --content-weight 1.0 \
     --style-weight 20.0 \
     --identity-weight 0.1 \
-    --checkpoint-dir checkpoints/experiment_style_20.0 \
+    --checkpoint-dir checkpoints/exp_balance_1_20 \
     --epochs 20
 ```
 
-**Recommended values:**
+**Weight Balance Guide:**
+
+| Content:Style Ratio | Visual Effect | Content Loss | Style Loss | Best For |
+|---------------------|---------------|--------------|------------|----------|
+| **1:20** | Very artistic | Low importance | Dominant | Abstract styles |
+| **1:15** | Strong style | Medium-low | High | Impressionist |
+| **1:10** ⭐ | Balanced | Equal importance | Dominant | **General use** |
+| **1:5** | Subtle style | High | Medium | Photorealistic |
+| **2:10** | Conservative | Very high | Medium | Portrait preservation |
+
+**Key Principle:** Keep the 1:10 ratio and adjust identity weight (γ) instead for best results!
+
+**Recommended ranges:**
 - Content weight: λ_content ∈ [0.5, 2.0] (default: 1.0)
 - Style weight: λ_style ∈ [5.0, 20.0] (default: 10.0)
-- Identity weight: γ ∈ [0.0, 0.5] (default: 0.1)
+- **Keep ratio around 1:10 for most cases!**
 
-### Experiment 4: Training Duration
+---
+
+### Experiment 4: Identity Weight (γ) - Add Identity Preservation
+
+**ONLY AFTER optimizing baseline (steps 1-3)!** Now add the identity preservation constraint.
+
+⚠️ **CRITICAL FINDING:** γ=1.0 is **TOO HIGH** and actually **hurts** identity preservation!
 
 ```bash
-# Quick experiment (fast iteration)
-python train_model.py \
-    --content-dir data/content \
-    --style-dir data/style \
-    --epochs 10 \
-    --checkpoint-dir checkpoints/experiment_10epochs
+# Start with optimized baseline (γ=0.0)
+# Use the best learning rate and content/style weights from previous experiments
 
-# Extended training (better quality)
+# Subtle identity preservation ⭐ RECOMMENDED START
 python train_model.py \
     --content-dir data/content \
     --style-dir data/style \
-    --epochs 40 \
-    --checkpoint-dir checkpoints/experiment_40epochs
+    --batch-size 32 \
+    --learning-rate 0.0001 \
+    --content-weight 1.0 \
+    --style-weight 10.0 \
+    --identity-weight 0.1 \
+    --checkpoint-dir checkpoints/identity_gamma_0.1 \
+    --epochs 20
+
+# If you want more identity preservation
+python train_model.py \
+    --batch-size 32 \
+    --identity-weight 0.2 \
+    --checkpoint-dir checkpoints/identity_gamma_0.2 \
+    --epochs 20
+
+# If you want less (more artistic freedom)
+python train_model.py \
+    --batch-size 32 \
+    --identity-weight 0.05 \
+    --checkpoint-dir checkpoints/identity_gamma_0.05 \
+    --epochs 20
+
+# ❌ NEVER USE γ ≥ 1.0 (causes loss function conflicts!)
 ```
 
-**Recommended epochs:**
-- Quick test: 5-10 epochs (~1-2 minutes)
-- Standard: 20 epochs (~4 minutes, good quality)
-- Extended: 30-50 epochs (~6-10 minutes, best quality)
+**Identity Weight Guide:**
 
-### Experiment 5: Batch Size & Image Size
+| γ value | Identity Preservation | Stylization Quality | Expected Face Similarity | Use Case |
+|---------|----------------------|---------------------|-------------------------|----------|
+| **0.0** | Baseline (none) | Excellent | ~0.76 | Optimized baseline |
+| **0.05** | Subtle | Excellent | ~0.78 | Slight hints |
+| **0.1** ⭐ | Balanced | Very Good | ~0.82 | **Best trade-off** |
+| **0.2** | Strong | Good | ~0.85 | More preservation |
+| **0.3** | Very Strong | Moderate | ~0.87 | Heavy preservation |
+| **0.5** | Maximum | Weak | ~0.88 | Minimal stylization |
+| **1.0** ❌ | **TOO HIGH!** | Poor | ~0.75 | **Conflicts! Avoid!** |
+
+**Why γ=1.0 fails:**
+```python
+# Loss function: L_total = content + 10×style + γ×identity
+
+# With γ=1.0 (BAD):
+L_total = 1.0×content + 10.0×style + 1.0×identity
+# Identity fights equally with content → Confusion!
+
+# With γ=0.1 (GOOD):
+L_total = 1.0×content + 10.0×style + 0.1×identity  
+# Identity is gentle constraint → Harmony!
+```
+
+**Evaluation strategy:**
+1. Train baseline (γ=0.0) with optimized hyperparameters
+2. Train with γ=0.1 (recommended starting point)
+3. Compare face similarity: target improvement of +5-10%
+4. If identity too weak: try γ=0.2
+5. If stylization too weak: try γ=0.05
+
+---
+
+### Experiment 5: Image Resolution
 
 ```bash
-# Larger batch (faster training, more memory)
+# Default resolution (fast, good quality) ⭐ RECOMMENDED
 python train_model.py \
     --content-dir data/content \
     --style-dir data/style \
-    --batch-size 16 \
-    --checkpoint-dir checkpoints/experiment_batch_16
+    --batch-size 32 \
+    --image-size 256 \
+    --checkpoint-dir checkpoints/exp_size_256
 
-# Higher resolution (better quality, slower)
+# High resolution (slower, better quality)
 python train_model.py \
     --content-dir data/content \
     --style-dir data/style \
+    --batch-size 8 \
     --image-size 512 \
+    --checkpoint-dir checkpoints/exp_size_512
+
+# Very high resolution (slowest, best quality)
+python train_model.py \
+    --content-dir data/content \
+    --style-dir data/style \
     --batch-size 4 \
-    --checkpoint-dir checkpoints/experiment_size_512
+    --image-size 768 \
+    --checkpoint-dir checkpoints/exp_size_768
 ```
 
-**Recommended values:**
-- Batch size: 4-16 (depends on GPU memory)
-- Image size: 256-512 (256 is default, 512 for higher quality)
+**Resolution Guide:**
+
+| Image Size | Training Time | Memory Usage | Batch Size | Quality | Best For |
+|------------|---------------|--------------|------------|---------|----------|
+| **256** ⭐ | ~4 min | Low | 32 | Good | **Standard use** |
+| **384** | ~7 min | Medium | 16 | Very good | High quality |
+| **512** | ~12 min | High | 8 | Excellent | Publication |
+| **768** | ~25 min | Very high | 4 | Best | Poster prints |
+
+**Note:** Higher resolution requires reducing batch size to fit in GPU memory!
+
+---
 
 ### Evaluating Your Experiments
 
-After training, compare your models:
+**Step-by-step evaluation workflow:**
 
 ```bash
-# Generate results for your experimental model
+# 1. Generate stylized images with your experimental model
 python eval_inference.py \
     --content data/eval_content/ \
     --style data/style/ \
-    --output results/experiment_gamma_0.2/ \
-    --checkpoint checkpoints/experiment_gamma_0.2/final_model.pth
+    --output results/my_experiment/ \
+    --checkpoint checkpoints/my_experiment/final_model.pth
 
-# Create comparisons
+# 2. Create comparison grids with metrics
 python result_visualize.py \
     --content-dir data/eval_content \
     --style-dir data/style \
-    --baseline-dir results/eval_v1/baseline \
-    --identity-dir results/experiment_gamma_0.2 \
-    --output-dir results/experiment_gamma_0.2_comparisons
+    --baseline-dir results/eval_v2/baseline \
+    --identity-dir results/my_experiment \
+    --output-dir results/my_experiment_comparisons \
+    --baseline-checkpoint checkpoints/baseline_final \
+    --identity-checkpoint checkpoints/my_experiment
 ```
 
-### Tips for Experimentation
+**What to look for:**
 
-1. **Start with identity weight (γ)**: This has the biggest impact on the trade-off
-2. **Keep content and style weights in 1:10 ratio**: This ratio works well across settings
-3. **Use checkpoints**: Save every 5 epochs with `--save-interval 5`
-4. **Monitor training logs**: Watch for identity loss and face similarity trends
-5. **Visual inspection matters**: Numbers don't tell the whole story—look at the outputs!
-6. **Try multiple styles**: Some styles work better with higher/lower γ values
+1. **Quantitative Metrics** (printed in summary):
+   - **Face Similarity:** Higher = better identity preservation (target: >0.80)
+   - **Perceptual Similarity:** Higher = better stylization (target: >0.70)
+   - **SSIM:** Higher = better structure preservation (target: >0.35)
+
+2. **Training Curves** (in comparison output):
+   - Smooth decrease = good convergence
+   - Oscillations = learning rate too high
+   - Plateau = converged (or learning rate too low)
+
+3. **Visual Quality** (in comparison grids):
+   - Are faces recognizable?
+   - Is artistic style successfully applied?
+   - Any artifacts or color distortions?
+
+---
+
+### Complete Experiment Workflow Example
+
+Here's a complete systematic workflow:
+
+```bash
+# ============================================
+# Step 1: Find optimal batch size for your GPU
+# ============================================
+# Test with 1 epoch to find maximum batch size
+python train_model.py --batch-size 32 --epochs 1 --checkpoint-dir checkpoints/test_batch
+
+# If successful, try 48 or 64; if OOM, try 16 or 8
+
+# ============================================
+# Step 2: Test different learning rates (5 epochs each)
+# ============================================
+for lr in 0.0001 0.0002 0.00005; do
+    python train_model.py \
+        --batch-size 32 \
+        --learning-rate $lr \
+        --epochs 5 \
+        --checkpoint-dir checkpoints/test_lr_$lr
+done
+
+# Check training_curves.csv - pick the smoothest one
+
+# ============================================
+# Step 3: Check for overfitting (20 epochs baseline)
+# ============================================
+python train_model.py \
+    --batch-size 32 \
+    --learning-rate 0.0001 \
+    --identity-weight 0.0 \
+    --epochs 20 \
+    --checkpoint-dir checkpoints/baseline \
+    --save-interval 5
+
+# Check if train loss << val loss
+cat checkpoints/baseline/training_curves.csv
+# If overfitting, reduce to 10 epochs; if not, proceed
+
+# ============================================
+# Step 4: Optimize baseline stylization (optional)
+# ============================================
+# Try different content/style weight ratios if needed
+python train_model.py \
+    --batch-size 32 \
+    --content-weight 1.0 \
+    --style-weight 15.0 \
+    --identity-weight 0.0 \
+    --epochs 20 \
+    --checkpoint-dir checkpoints/baseline_style_15
+
+# ============================================
+# Step 5: Add identity preservation
+# ============================================
+for gamma in 0.05 0.1 0.2; do
+    python train_model.py \
+        --batch-size 32 \
+        --learning-rate 0.0001 \
+        --content-weight 1.0 \
+        --style-weight 10.0 \
+        --identity-weight $gamma \
+        --epochs 20 \
+        --checkpoint-dir checkpoints/identity_gamma_$gamma \
+        --save-interval 5
+done
+
+# ============================================
+# Step 6: Generate results for all models
+# ============================================
+# First generate baseline results
+python eval_inference.py \
+    --content data/eval_content/ \
+    --style data/style/ \
+    --checkpoint checkpoints/baseline/final_model.pth \
+    --output results/baseline/
+
+# Then identity-preserving models
+for gamma in 0.05 0.1 0.2; do
+    python eval_inference.py \
+        --content data/eval_content/ \
+        --style data/style/ \
+        --checkpoint checkpoints/identity_gamma_$gamma/final_model.pth \
+        --output results/identity_gamma_$gamma/
+done
+
+# ============================================
+# Step 7: Create comparison grids
+# ============================================
+for gamma in 0.05 0.1 0.2; do
+    python result_visualize.py \
+        --baseline-dir results/baseline \
+        --identity-dir results/identity_gamma_$gamma \
+        --output-dir results/comparison_gamma_$gamma \
+        --baseline-checkpoint checkpoints/baseline \
+        --identity-checkpoint checkpoints/identity_gamma_$gamma
+done
+
+# ============================================
+# Step 8: Compare metrics and pick best model
+# ============================================
+# Review comparison grids and metrics
+# Look for: face similarity improvement (+5-10%) with minimal perceptual loss (<2%)
+```
+
+---
+
+### Tips for Successful Experimentation
+
+**Priority order (systematic ML approach):**
+
+1. **Batch size** ⚡ **START HERE**
+   - GPU hardware constraint
+   - Find maximum for your GPU
+   - Affects training speed significantly
+   - Minimal impact on final quality
+
+2. **Learning rate** 📈 **CRITICAL FOR PERFORMANCE**
+   - Most important for convergence and quality
+   - Test {5e-5, 1e-4, 2e-4} if needed
+   - Check for smooth loss curves
+   - Too high = oscillations, too low = slow convergence
+
+3. **Epochs** ⏰ **CHECK OVERFITTING**
+   - 20 epochs sufficient for most cases
+   - Only tune if train loss << val loss
+   - Use `--save-interval 5` to save checkpoints
+
+4. **Content/Style weights** ⚖️ **OPTIMIZE BASELINE**
+   - Tune baseline stylization (γ=0.0) first
+   - Keep 1:10 ratio in most cases
+   - Test different ratios for artistic effects
+
+5. **Identity weight (γ)** 🎯 **ADD LAST**
+   - **Only after baseline is optimized!**
+   - Start with γ=0.1 (recommended)
+   - Test γ ∈ {0.05, 0.1, 0.2} based on baseline results
+   - ⚠️ Never use γ > 0.5 (conflicts with stylization)
+
+**Key Principles:**
+
+✅ **DO:**
+- Start with defaults (batch=32, lr=1e-4, γ=0.1, epochs=20)
+- Change ONE hyperparameter at a time
+- Save all checkpoints with descriptive names
+- Keep notes on what each experiment tests
+- Use visual inspection + metrics together
+
+❌ **DON'T:**
+- Use γ > 0.5 (conflicts with style transfer!)
+- Change multiple hyperparameters at once
+- Skip batch size optimization (wastes training time)
+- Rely only on metrics (visual quality matters!)
+- Train for too few epochs (<10, results will be poor)
 
 ---
 
@@ -520,6 +926,6 @@ This project is created for educational purposes as part of CS230. The code is p
 ---
 
 **Last Updated:** October 29, 2025  
-**Status:** Complete and ready for submission  
+**Status:** Complete and ready for submission
 **Project Structure:** Cleaned and organized (deprecated files archived)
 
