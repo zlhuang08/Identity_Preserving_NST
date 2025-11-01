@@ -159,6 +159,89 @@ We trained two models:
 
 Both models were trained for 20 epochs on 200 synthetic faces with 21 artistic styles (4,200 combinations) with identical hyperparameters except for γ. We use a lower identity weight (γ=0.1) compared to prior work (γ=1.0) to maintain a good balance between stylization quality and identity preservation.
 
+#### 3.1.1 Learning Rate Optimization
+
+Before training the final models, we conducted a systematic learning rate sweep to determine the optimal learning rate for convergence. We tested 5 learning rates: 1e-5, 3e-5, 1e-4, 3e-4, and 1e-3, training each for 10 epochs on the full dataset (120 content × 21 styles = 2,520 training pairs per epoch).
+
+![Learning Rate Comparison](results/tuning/learning_rate_comparison.png)
+
+**Figure 1:** Training and validation loss curves for different learning rates (log scale). The baseline model (γ=0.0) was trained with batch size 64 for 10 epochs to evaluate convergence behavior.
+
+**Results:**
+
+| Learning Rate | Final Train Loss | Final Val Loss | Convergence Rate | Stability |
+|---------------|------------------|----------------|------------------|-----------|
+| 1e-5 | 62.25 | 61.10 | 147.65 | High (too slow) |
+| 3e-5 | 45.18 | 44.61 | 118.25 | High |
+| **1e-4** ⭐ | **31.89** | **31.94** | **103.85** | **Good** |
+| 3e-4 | 33.87 | 38.30 | 144.91 | Medium |
+| 1e-3 | 221.79 | 220.85 | 12890.99 | Very low (unstable) |
+
+**Key Findings:**
+
+1. **LR=1e-4 (default) is optimal:** Achieves the lowest validation loss (31.94) with stable convergence
+2. **LR=1e-5 too slow:** Only reached 61.10 validation loss after 10 epochs—barely improving from initialization
+3. **LR=3e-5 competitive:** Second best (44.61 val loss), but slower convergence than 1e-4
+4. **LR=3e-4 slightly unstable:** Higher validation loss (38.30) despite good training loss (33.87), suggesting slight overfitting or instability
+5. **LR=1e-3 diverges:** Extremely high loss (~221) with severe oscillations—learning rate too high for this task
+
+**Conclusion:** We use **learning rate = 1e-4** for all subsequent experiments, as it provides the best balance of convergence speed, final performance, and stability.
+
+#### 3.1.2 Content/Style Weight Optimization
+
+After determining the optimal learning rate, we conducted a systematic study of content/style weight ratios to validate our choice of 1:10 (λ_content=1.0, λ_style=10.0). We tested 5 different ratios: 1:1, 1:5, 1:10, 1:20, and 1:50, training each for 10 epochs.
+
+![Weight Ratio Comparison](results/tuning/weight_comparison.png)
+
+**Figure 2:** Pareto trade-off curve showing content loss vs. style loss for different weight ratios (left), and total loss comparison (right). The 1:10 ratio provides the optimal balance.
+
+**Results:**
+
+| Ratio | Val Loss (Total) | Val Content Loss | Val Style Loss | Balance |
+|-------|------------------|------------------|----------------|---------|
+| 1:1 | 11.22 | 6.72 | 4.50 | Equal (weak style) |
+| 1:5 | 22.79 | 13.22 | 1.91 | Content-focused |
+| **1:10** ⭐ | **31.96** | **16.68** | **1.53** | **Optimal** |
+| 1:20 | 48.77 | 20.00 | 1.44 | Style-focused |
+| 1:50 | 91.68 | 21.22 | 1.41 | Maximum style |
+
+**Key Findings:**
+
+1. **The Pareto Trade-Off:** As style weight increases, style loss decreases (better stylization) but content loss increases (worse structure preservation). This represents a fundamental trade-off that cannot be avoided.
+
+2. **1:10 is the "Knee" of the Curve:** 
+   - **Moving from 1:5 to 1:10:** Style loss improves by -20% (1.91 → 1.53) with +26% content cost (13.22 → 16.68) — **worthwhile trade-off**
+   - **Moving from 1:10 to 1:20:** Style loss improves by only -6% (1.53 → 1.44) with +20% content cost (16.68 → 20.00) — **diminishing returns**
+
+3. **Extreme Ratios Fail:**
+   - **1:1:** Style loss too high (4.50) — images barely stylized
+   - **1:50:** Content loss too high (21.22) — face structure severely degraded
+
+4. **Literature Validation:** Our experimental results independently confirm the industry standard. The AdaIN paper [Huang & Belongie, 2017] and Fast Style Transfer [Johnson et al., 2016] both use 1:10, which we now validate empirically.
+
+**Cost-Benefit Analysis:**
+
+The marginal benefit analysis clearly shows 1:10 as optimal:
+
+```
+Ratio    Style Gain    Content Cost    Verdict
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1:5→1:10   -20%          +26%         ✅ Worth it
+1:10→1:20   -6%          +20%         ❌ Not worth it
+1:20→1:50   -2%          +6%          ❌ Minimal gain
+```
+
+**Conclusion:** We use **content:style = 1:10** for all experiments. This ratio achieves strong artistic stylization while maintaining good structural preservation — exactly what we need for identity-preserving style transfer.
+
+**Visual Evidence:** We generated 210 stylized images (5 ratios × 2 faces × 21 styles) to provide visual validation. Side-by-side comparison grids (available in `results/tuning/weight_comparisons/`) clearly demonstrate that 1:10 provides the best balance:
+- **1:1 ratio**: Faces look barely stylized (weak artistic effect)
+- **1:5 ratio**: Subtle stylization, too content-focused
+- **1:10 ratio** ⭐: Strong artistic effect while maintaining recognizable face structure
+- **1:20 ratio**: Very strong stylization with noticeable face distortion
+- **1:50 ratio**: Maximum stylization but faces become unrecognizable
+
+The visual comparisons confirm our quantitative analysis: 1:10 is optimal for our children's book illustration use case.
+
 ### 3.2 Evaluation Metrics
 
 #### 3.2.1 Perceptual Similarity

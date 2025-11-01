@@ -281,6 +281,7 @@ python train_model.py \
 - Larger batch sizes = faster training but diminishing returns beyond 32
 - Use batch size 32 as default for most experiments
 
+batchsize = 64
 ---
 
 ### Experiment 1: Learning Rate Tuning
