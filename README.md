@@ -50,10 +50,15 @@ cs230_final_project/
 │   └── DATASET_SUMMARY.md              # Dataset documentation
 │
 ├── results/                            # Generated results
-│   └── eval_v1/                        # Latest evaluation results
-│       ├── baseline/                   # Baseline outputs (2 faces × 21 styles = 42 images)
-│       ├── identity/                   # Identity outputs (2 faces × 21 styles = 42 images)
-│       └── comparisons/                # Comparison grids with metrics (42 grids)
+│   ├── eval_v1/                        # Latest evaluation results
+│   │   ├── baseline/                   # Baseline outputs (2 faces × 21 styles = 42 images)
+│   │   ├── identity/                   # Identity outputs (2 faces × 21 styles = 42 images)
+│   │   └── comparisons/                # Comparison grids with metrics (42 grids)
+│   └── tuning/                         # Hyperparameter tuning results
+│       ├── learning_rate_curve.png     # Learning rate comparison (5 rates)
+│       ├── weight_comparisons/         # Content:Style ratio visual grids (5 ratios)
+│       ├── identity_comparisons/       # Identity weight visual grids (7 γ values)
+│       └── final_comparisons/          # Final 2×2 grids: Baseline vs Optimal (10 grids)
 │
 ├── logs/                               # Training and evaluation logs
 │   ├── training_baseline_final.log     # Latest baseline training
@@ -160,6 +165,27 @@ python result_visualize.py \
     --identity-dir results/eval_v1/identity \
     --output-dir results/eval_v1/comparisons
 ```
+
+### 6. Generate Final Comparison Grids (Optional)
+
+For a clean 2×2 layout showing baseline vs. optimal identity-preserving results:
+
+```bash
+# Generate final 2×2 comparison grids
+# Shows: Content | Style | Baseline (γ=0) | Identity (γ=1000)
+python results/create_final_comparisons.py
+
+# Output: results/tuning/final_comparisons/
+# - Clean 2×2 grid format perfect for reports and presentations
+# - Full metrics displayed on each image
+# - Improvement indicators (↑/↓) for easy comparison
+```
+
+**What you get:**
+- 10 final comparison grids (2 faces × 5 representative styles)
+- Clean 2×2 layout: Content | Style | Baseline | Optimal
+- Full metrics: SSIM, Perceptual Similarity, Face Similarity
+- Improvement indicators showing Δ vs baseline
 
 ---
 

@@ -597,6 +597,34 @@ def validate(model, dataloader, device, content_weight=1.0, style_weight=10.0,
     return avg_loss, avg_content_loss, avg_style_loss, avg_identity_loss, avg_similarity_epoch
 
 
+def worker_init_fn(worker_id):
+    """
+    Initialize random seeds for DataLoader workers.
+    
+    This ensures reproducibility when using multiple workers (num_workers > 0).
+    Each worker gets a different but deterministic seed based on:
+    - Base seed from args.seed
+    - Worker ID (0, 1, 2, ...)
+    
+    Without this, each worker would use a random (non-reproducible) seed!
+    
+    Args:
+        worker_id: Integer ID of the current worker (0-indexed)
+    
+    Example:
+        If args.seed=42 and num_workers=4:
+        - Worker 0: seed = 42 + 0 = 42
+        - Worker 1: seed = 42 + 1 = 43
+        - Worker 2: seed = 42 + 2 = 44
+        - Worker 3: seed = 42 + 3 = 45
+    """
+    # Get the base seed from torch's generator state
+    # This is set by torch.manual_seed(args.seed) earlier
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+
 def save_checkpoint(model, optimizer, epoch, loss, checkpoint_path):
     """
     Save model checkpoint to disk for resuming training or inference.
@@ -732,11 +760,23 @@ def main():
     # ========================================
     # Set random seeds for reproducibility
     # ========================================
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
-    random.seed(args.seed)
+    # CRITICAL: Set ALL random seeds for reproducible results
+    torch.manual_seed(args.seed)           # PyTorch CPU random seed
+    np.random.seed(args.seed)              # NumPy random seed
+    random.seed(args.seed)                 # Python random seed
+    
     if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.seed)
+        torch.cuda.manual_seed(args.seed)      # CUDA random seed (current GPU)
+        torch.cuda.manual_seed_all(args.seed)  # CUDA random seed (all GPUs)
+        
+        # CRITICAL: Enable deterministic CUDA operations
+        # This ensures identical results across runs with same seed
+        # WARNING: May slightly reduce performance (~5-10%)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        
+        print(f"✓ Reproducibility mode enabled (seed={args.seed})")
+        print(f"  Note: Deterministic CUDA may reduce performance by ~5-10%")
     
     # ========================================
     # Setup device
@@ -774,7 +814,8 @@ def main():
         batch_size=args.batch_size,
         shuffle=True,              # Shuffle for better training
         num_workers=args.num_workers,  # Parallel data loading
-        pin_memory=True            # Faster transfer to GPU
+        pin_memory=True,           # Faster transfer to GPU
+        worker_init_fn=worker_init_fn  # Seed workers for reproducibility
     )
     
     # ========================================
@@ -792,7 +833,8 @@ def main():
         batch_size=args.batch_size,
         shuffle=False,             # Don't shuffle validation (deterministic for curves)
         num_workers=args.num_workers,
-        pin_memory=True
+        pin_memory=True,
+        worker_init_fn=worker_init_fn  # Seed workers for reproducibility
     )
     print(f"Validation pairs: {len(val_dataset)}")
     

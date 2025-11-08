@@ -61,6 +61,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+import contextlib
 from PIL import Image
 import warnings
 
@@ -446,7 +447,7 @@ class FaceRecognizer:
         for param in self.model.parameters():
             param.requires_grad = False
     
-    def extract_embeddings(self, faces):
+    def extract_embeddings(self, faces, allow_grad=False):
         """
         Extract face embeddings (identity vectors) from face images.
         
@@ -458,6 +459,8 @@ class FaceRecognizer:
                    Example: (8, 3, 160, 160) - 8 face images, 160×160 pixels
                    Expected input size: 160×160 (standard for InceptionResnetV1)
                    MUST be in [0, 1] range!
+            allow_grad: If True, allows gradients to flow (for training identity loss)
+                       If False, uses no_grad for inference (default, saves memory)
         
         Returns:
             embeddings: (B, 512) tensor of L2-normalized face embeddings
@@ -466,17 +469,24 @@ class FaceRecognizer:
                        Values typically in [-1, 1] range
         
         Example:
-            # Extract embeddings from detected faces
+            # Extract embeddings from detected faces (inference)
             faces = detector.extract_faces(images)  # (5, 3, 160, 160)
             embeddings = recognizer.extract_embeddings(faces)  # (5, 512)
+            
+            # Extract embeddings with gradients (for training)
+            embeddings = recognizer.extract_embeddings(faces, allow_grad=True)
             
             # First person's identity vector
             person1_emb = embeddings[0]  # (512,)
             print(person1_emb.shape)  # torch.Size([512])
             print(torch.norm(person1_emb))  # 1.0 (L2 normalized)
         """
-        # No gradient computation needed (inference only)
-        with torch.no_grad():
+        # Use no_grad context only if allow_grad=False
+        # This allows gradients to flow during training while still
+        # being efficient during inference
+        maybe_no_grad = torch.no_grad() if not allow_grad else contextlib.nullcontext()
+        
+        with maybe_no_grad:
             # ========================================
             # Step 1: Normalize input to [-1, 1] range
             # ========================================
@@ -492,6 +502,8 @@ class FaceRecognizer:
             # ========================================
             # The model processes the face through many layers:
             # Input (160×160) → Conv layers → Inception blocks → ResNet blocks → FC → Embedding (512)
+            # NOTE: The face recognition model parameters are FROZEN (not trainable)
+            # But we allow gradients to flow through for computing identity loss
             embeddings = self.model(faces_normalized)
             
             # ========================================
@@ -792,8 +804,11 @@ class IdentityPreserver:
         # Step 7: Extract identity embeddings
         # ========================================
         # Convert face images to 512-d identity vectors
-        content_embeddings = self.recognizer.extract_embeddings(matched_content_faces)  # (N, 512)
-        gen_embeddings = self.recognizer.extract_embeddings(matched_gen_faces)          # (N, 512)
+        # IMPORTANT: allow_grad=True enables gradient flow for training
+        # The face recognition model parameters are frozen, but gradients
+        # flow through it to update the style transfer model
+        content_embeddings = self.recognizer.extract_embeddings(matched_content_faces, allow_grad=True)  # (N, 512)
+        gen_embeddings = self.recognizer.extract_embeddings(matched_gen_faces, allow_grad=True)          # (N, 512)
         
         # ========================================
         # Step 8: Compute identity loss
