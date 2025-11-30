@@ -104,7 +104,7 @@ import random
 
 # Import our custom modules
 from model_adain import AdaINStyleTransfer, calc_content_loss, calc_style_loss
-from model_face_utils import IdentityPreserver
+from model_face_utils import IdentityPreserver, FaceDetector
 
 
 class ImageDataset(Dataset):
@@ -323,7 +323,8 @@ class ImageDataset(Dataset):
 
 
 def train_epoch(model, dataloader, optimizer, device, content_weight=1.0, style_weight=10.0, 
-                identity_weight=0.0, identity_preserver=None):
+                identity_weight=0.0, identity_preserver=None, eye_weight=0.0, eye_loss_module=None,
+                face_aware_adain=False, face_detector=None, face_preservation_alpha=0.3, face_mask_margin=1.3):
     """
     Train the model for one epoch - THE MAIN TRAINING LOOP!
     
@@ -342,11 +343,13 @@ def train_epoch(model, dataloader, optimizer, device, content_weight=1.0, style_
     Total Loss = content_weight × Content Loss
                 + style_weight × Style Loss
                 + identity_weight × Identity Loss
+                + eye_weight × Eye Loss
     
     Typical weights:
     - content_weight = 1.0 (baseline)
     - style_weight = 10.0 (style is more important for artistic look)
-    - identity_weight = 0.0 (baseline) or 0.1 (with identity preservation)
+    - identity_weight = 0.0 (baseline) or 1000.0 (with identity preservation)
+    - eye_weight = 0.0 (baseline) or 100.0 (with eye-specific preservation)
     
     Args:
         model: AdaINStyleTransfer model (encoder + decoder + adain)
@@ -402,7 +405,9 @@ def train_epoch(model, dataloader, optimizer, device, content_weight=1.0, style_
     total_content_loss = 0.0    # Sum of content losses
     total_style_loss = 0.0      # Sum of style losses
     total_identity_loss = 0.0   # Sum of identity losses
+    total_eye_loss = 0.0        # Sum of eye-specific losses
     total_identity_samples = 0  # Count of detected face pairs
+    total_eye_samples = 0       # Count of detected eye pairs
     total_similarity = 0.0      # Sum of similarity scores (weighted by num faces)
     
     # Progress bar for visual feedback during training
@@ -419,9 +424,30 @@ def train_epoch(model, dataloader, optimizer, device, content_weight=1.0, style_
         # ========================================
         # Forward pass - generate stylized image
         # ========================================
-        # This extracts features, applies AdaIN, decodes, AND gets intermediate features for loss
-        stylized, gen_features, content_features, style_features = \
-            model.forward_with_features(content, style)
+        # Two modes:
+        # 1. Standard AdaIN (baseline)
+        # 2. Face-aware AdaIN (regional adaptive normalization)
+        
+        if face_aware_adain and face_detector is not None:
+            # Face-aware AdaIN: lighter stylization in face regions
+            # Generate face masks for this batch
+            with torch.no_grad():  # No gradients needed for mask generation
+                face_masks = face_detector.generate_face_masks(
+                    content, 
+                    margin_factor=face_mask_margin
+                )
+            
+            # Forward pass with face-aware AdaIN
+            stylized, gen_features, content_features, style_features = \
+                model.forward_with_features_face_aware(
+                    content, style, face_masks, 
+                    face_preservation_alpha=face_preservation_alpha
+                )
+        else:
+            # Standard AdaIN (baseline)
+            stylized, gen_features, content_features, style_features = \
+                model.forward_with_features(content, style)
+        
         # stylized: (B, 3, 256, 256) - the output stylized image
         # gen_features: dict - VGG features of stylized image at 4 layers
         # content_features: dict - VGG features of content image at 4 layers
@@ -459,13 +485,25 @@ def train_epoch(model, dataloader, optimizer, device, content_weight=1.0, style_
                 total_similarity += avg_similarity * num_faces
         
         # ========================================
+        # Eye-Specific Loss (YOUR NOVEL CONTRIBUTION!)
+        # ========================================
+        eye_loss = torch.tensor(0.0, device=device, requires_grad=True)
+        num_eyes = 0
+        
+        if eye_weight > 0 and eye_loss_module is not None:
+            eye_loss, eye_metrics = eye_loss_module.compute_eye_loss(stylized, content)
+            num_eyes = eye_metrics['num_matched_eyes']
+            total_eye_samples += num_eyes
+        
+        # ========================================
         # Compute total weighted loss
         # ========================================
         # Typical values:
         # - content_weight = 1.0
         # - style_weight = 10.0 (style is weighted 10x more!)
-        # - identity_weight = 0.0 (baseline) or 0.1 (with identity)
-        loss = content_weight * content_loss + style_weight * style_loss + identity_weight * identity_loss
+        # - identity_weight = 0.0 (baseline) or 1000.0 (with identity)
+        # - eye_weight = 0.0 (baseline) or 100.0 (with eye-specific)
+        loss = content_weight * content_loss + style_weight * style_loss + identity_weight * identity_loss + eye_weight * eye_loss
         
         # ========================================
         # Backward pass and optimization
@@ -481,6 +519,7 @@ def train_epoch(model, dataloader, optimizer, device, content_weight=1.0, style_
         total_content_loss += content_loss.item()
         total_style_loss += style_loss.item()
         total_identity_loss += identity_loss.item()
+        total_eye_loss += eye_loss.item()
         
         # ========================================
         # Update progress bar with current batch stats
@@ -496,6 +535,10 @@ def train_epoch(model, dataloader, optimizer, device, content_weight=1.0, style_
             postfix['faces'] = num_faces
             if num_faces > 0:
                 postfix['sim'] = avg_similarity  # Show similarity if faces detected
+        # Add eye metrics if using eye-specific loss
+        if eye_weight > 0:
+            postfix['eye'] = eye_loss.item()
+            postfix['eyes'] = num_eyes
         
         pbar.set_postfix(postfix)
     
@@ -506,16 +549,18 @@ def train_epoch(model, dataloader, optimizer, device, content_weight=1.0, style_
     avg_content_loss = total_content_loss / len(dataloader)
     avg_style_loss = total_style_loss / len(dataloader)
     avg_identity_loss = total_identity_loss / len(dataloader)
+    avg_eye_loss = total_eye_loss / len(dataloader)
     
     # Calculate average face similarity (weighted by number of faces)
     # Only meaningful if identity preservation is enabled and faces were detected
     avg_similarity_epoch = total_similarity / total_identity_samples if total_identity_samples > 0 else 0.0
     
-    return avg_loss, avg_content_loss, avg_style_loss, avg_identity_loss, avg_similarity_epoch
+    return avg_loss, avg_content_loss, avg_style_loss, avg_identity_loss, avg_eye_loss, avg_similarity_epoch
 
 
 def validate(model, dataloader, device, content_weight=1.0, style_weight=10.0,
-             identity_weight=0.0, identity_preserver=None):
+             identity_weight=0.0, identity_preserver=None, eye_weight=0.0, eye_loss_module=None,
+             face_aware_adain=False, face_detector=None, face_preservation_alpha=0.3, face_mask_margin=1.3):
     """
     Validate the model on a held-out validation set.
     
@@ -545,7 +590,9 @@ def validate(model, dataloader, device, content_weight=1.0, style_weight=10.0,
     total_content_loss = 0.0
     total_style_loss = 0.0
     total_identity_loss = 0.0
+    total_eye_loss = 0.0
     total_identity_samples = 0
+    total_eye_samples = 0
     total_similarity = 0.0
     
     # ========================================
@@ -557,8 +604,21 @@ def validate(model, dataloader, device, content_weight=1.0, style_weight=10.0,
             style = style.to(device)
             
             # Forward pass (same as training)
-            stylized, gen_features, content_features, style_features = \
-                model.forward_with_features(content, style)
+            if face_aware_adain and face_detector is not None:
+                # Face-aware AdaIN
+                face_masks = face_detector.generate_face_masks(
+                    content, 
+                    margin_factor=face_mask_margin
+                )
+                stylized, gen_features, content_features, style_features = \
+                    model.forward_with_features_face_aware(
+                        content, style, face_masks,
+                        face_preservation_alpha=face_preservation_alpha
+                    )
+            else:
+                # Standard AdaIN
+                stylized, gen_features, content_features, style_features = \
+                    model.forward_with_features(content, style)
             
             # Calculate losses (same as training)
             content_loss = calc_content_loss(gen_features, content_features)
@@ -578,23 +638,34 @@ def validate(model, dataloader, device, content_weight=1.0, style_weight=10.0,
                 if num_faces > 0:
                     total_similarity += avg_similarity * num_faces
             
+            # Calculate eye loss if enabled
+            eye_loss = torch.tensor(0.0, device=device)
+            num_eyes = 0
+            
+            if eye_weight > 0 and eye_loss_module is not None:
+                eye_loss, eye_metrics = eye_loss_module.compute_eye_loss(stylized, content)
+                num_eyes = eye_metrics['num_matched_eyes']
+                total_eye_samples += num_eyes
+            
             # Total weighted loss
-            loss = content_weight * content_loss + style_weight * style_loss + identity_weight * identity_loss
+            loss = content_weight * content_loss + style_weight * style_loss + identity_weight * identity_loss + eye_weight * eye_loss
             
             # Accumulate losses
             total_loss += loss.item()
             total_content_loss += content_loss.item()
             total_style_loss += style_loss.item()
             total_identity_loss += identity_loss.item()
+            total_eye_loss += eye_loss.item()
     
     # Calculate averages
     avg_loss = total_loss / len(dataloader)
     avg_content_loss = total_content_loss / len(dataloader)
     avg_style_loss = total_style_loss / len(dataloader)
     avg_identity_loss = total_identity_loss / len(dataloader)
+    avg_eye_loss = total_eye_loss / len(dataloader)
     avg_similarity_epoch = total_similarity / total_identity_samples if total_identity_samples > 0 else 0.0
     
-    return avg_loss, avg_content_loss, avg_style_loss, avg_identity_loss, avg_similarity_epoch
+    return avg_loss, avg_content_loss, avg_style_loss, avg_identity_loss, avg_eye_loss, avg_similarity_epoch
 
 
 def worker_init_fn(worker_id):
@@ -723,7 +794,29 @@ def main():
     parser.add_argument('--style-weight', type=float, default=10.0,
                         help='Weight for style loss (typically 10.0)')
     parser.add_argument('--identity-weight', type=float, default=0.0,
-                        help='Weight for identity loss: 0.0=baseline, 0.1=with identity')
+                        help='Weight for identity loss: 0.0=baseline, 1000.0=optimal (from comprehensive tuning)')
+    parser.add_argument('--eye-weight', type=float, default=0.0,
+                        help='Weight for eye-specific loss: 0.0=disabled, 100.0=recommended (YOUR novel contribution!)')
+    
+    # ========================================
+    # Face-aware AdaIN (Regional Adaptive Normalization)
+    # ========================================
+    parser.add_argument('--use-face-aware-adain', action='store_true',
+                        help='Enable face-aware AdaIN (lighter stylization in face regions). '
+                             'Inspired by Ulyanov et al. for better identity preservation. '
+                             'Default: False (use standard AdaIN)')
+    parser.add_argument('--face-preservation-alpha', type=float, default=0.3,
+                        help='Stylization strength in face regions (0.0-1.0). '
+                             '0.0 = full stylization (same as baseline), '
+                             '0.3 = 30%% stylization, 70%% content (RECOMMENDED), '
+                             '0.5 = half stylization, '
+                             '1.0 = no stylization (pure content). '
+                             'Only used if --use-face-aware-adain is enabled. Default: 0.3')
+    parser.add_argument('--face-mask-margin', type=float, default=1.3,
+                        help='Expand face bounding box by this factor (>= 1.0). '
+                             '1.0 = exact box, 1.3 = expand by 30%% (default, includes hair/ears), '
+                             '1.5 = expand by 50%% (more context). '
+                             'Only used if --use-face-aware-adain is enabled. Default: 1.3')
     
     # ========================================
     # Model configuration
@@ -886,6 +979,45 @@ def main():
             args.identity_weight = 0
     
     # ============================================================================
+    # EYE-SPECIFIC LOSS (Novel Contribution!)
+    # ============================================================================
+    eye_loss_module = None
+    if args.eye_weight > 0:
+        print(f"\nInitializing eye-specific loss (weight={args.eye_weight})...")
+        try:
+            from model_face_utils import EyeSpecificLoss
+            eye_loss_module = EyeSpecificLoss(device=device)
+            print("✓ Eye-specific loss initialized successfully")
+            print("   Eye detector: MTCNN (eye landmarks)")
+            print("   Feature extractor: VGG19 (relu2_1)")
+            print("   🎯 YOUR NOVEL CONTRIBUTION!")
+        except ImportError as e:
+            print(f"⚠️  Warning: Could not initialize eye-specific loss: {e}")
+            print("   Install facenet-pytorch: pip install facenet-pytorch")
+            print("   Continuing without eye loss...")
+            args.eye_weight = 0
+    
+    # ============================================================================
+    # FACE DETECTOR (for face-aware AdaIN)
+    # ============================================================================
+    face_detector = None
+    if args.use_face_aware_adain:
+        print(f"\nInitializing face detector for face-aware AdaIN...")
+        print(f"   Face preservation alpha: {args.face_preservation_alpha} (0=full style, 1=full content)")
+        print(f"   Face mask margin: {args.face_mask_margin}x (expand bounding box)")
+        try:
+            face_detector = FaceDetector(device=device, keep_all=False, min_face_size=20)
+            print("✓ Face detector initialized successfully")
+            print("   Method: MTCNN (Multi-task Cascaded CNN)")
+            print("   Usage: Generates masks for regional adaptive normalization")
+            print("   Effect: Lighter stylization in face regions, full style in background")
+        except ImportError as e:
+            print(f"⚠️  Warning: Could not initialize face detector: {e}")
+            print("   Install facenet-pytorch: pip install facenet-pytorch")
+            print("   Disabling face-aware AdaIN...")
+            args.use_face_aware_adain = False
+    
+    # ============================================================================
     # RESUME FROM CHECKPOINT (optional)
     # ============================================================================
     start_epoch = 0
@@ -914,6 +1046,13 @@ def main():
     print(f"  Style: {args.style_weight}")
     if args.identity_weight > 0:
         print(f"  Identity: {args.identity_weight}")
+    
+    if args.use_face_aware_adain:
+        print(f"\nFace-aware AdaIN: ENABLED")
+        print(f"  Face preservation alpha: {args.face_preservation_alpha}")
+        print(f"  Face mask margin: {args.face_mask_margin}x")
+    else:
+        print(f"\nFace-aware AdaIN: DISABLED (standard AdaIN)")
     print("="*50 + "\n")
     
     # Track best validation loss for model selection
@@ -927,6 +1066,8 @@ def main():
     csv_header = 'epoch,train_loss,train_content,train_style,val_loss,val_content,val_style'
     if args.identity_weight > 0:
         csv_header += ',train_identity,train_similarity,val_identity,val_similarity'
+    if args.eye_weight > 0:
+        csv_header += ',train_eye,val_eye'
     csv_file.write(csv_header + '\n')
     csv_file.flush()  # Ensure header is written immediately
     print(f"✓ Training curves will be saved to: {csv_path}\n")
@@ -941,7 +1082,7 @@ def main():
         # ========================================
         # Training phase
         # ========================================
-        train_loss, train_content_loss, train_style_loss, train_identity_loss, train_similarity = train_epoch(
+        train_loss, train_content_loss, train_style_loss, train_identity_loss, train_eye_loss, train_similarity = train_epoch(
             model=model,
             dataloader=train_loader,
             optimizer=optimizer,
@@ -949,33 +1090,49 @@ def main():
             content_weight=args.content_weight,
             style_weight=args.style_weight,
             identity_weight=args.identity_weight,
-            identity_preserver=identity_preserver
+            identity_preserver=identity_preserver,
+            eye_weight=args.eye_weight,
+            eye_loss_module=eye_loss_module,
+            face_aware_adain=args.use_face_aware_adain,
+            face_detector=face_detector,
+            face_preservation_alpha=args.face_preservation_alpha,
+            face_mask_margin=args.face_mask_margin
         )
         
         # Print training statistics
         train_stats = f"\nTrain Loss: {train_loss:.4f} (Content: {train_content_loss:.4f}, Style: {train_style_loss:.4f}"
         if args.identity_weight > 0:
             train_stats += f", Identity: {train_identity_loss:.4f}, Similarity: {train_similarity:.4f}"
+        if args.eye_weight > 0:
+            train_stats += f", Eye: {train_eye_loss:.4f}"
         train_stats += ")"
         print(train_stats)
         
         # ========================================
         # Validation phase (always run for proper training curves)
         # ========================================
-        val_loss, val_content_loss, val_style_loss, val_identity_loss, val_similarity = validate(
+        val_loss, val_content_loss, val_style_loss, val_identity_loss, val_eye_loss, val_similarity = validate(
             model=model,
             dataloader=val_loader,
             device=device,
             content_weight=args.content_weight,
             style_weight=args.style_weight,
             identity_weight=args.identity_weight,
-            identity_preserver=identity_preserver
+            identity_preserver=identity_preserver,
+            eye_weight=args.eye_weight,
+            eye_loss_module=eye_loss_module,
+            face_aware_adain=args.use_face_aware_adain,
+            face_detector=face_detector,
+            face_preservation_alpha=args.face_preservation_alpha,
+            face_mask_margin=args.face_mask_margin
         )
         
         # Print validation statistics
         val_stats = f"Val Loss: {val_loss:.4f} (Content: {val_content_loss:.4f}, Style: {val_style_loss:.4f}"
         if args.identity_weight > 0:
             val_stats += f", Identity: {val_identity_loss:.4f}, Similarity: {val_similarity:.4f}"
+        if args.eye_weight > 0:
+            val_stats += f", Eye: {val_eye_loss:.4f}"
         val_stats += ")"
         print(val_stats)
         
@@ -987,6 +1144,8 @@ def main():
         if args.identity_weight > 0:
             csv_line += f",{train_identity_loss:.6f},{train_similarity:.6f},"
             csv_line += f"{val_identity_loss:.6f},{val_similarity:.6f}"
+        if args.eye_weight > 0:
+            csv_line += f",{train_eye_loss:.6f},{val_eye_loss:.6f}"
         csv_file.write(csv_line + '\n')
         csv_file.flush()  # Ensure data is written immediately
         

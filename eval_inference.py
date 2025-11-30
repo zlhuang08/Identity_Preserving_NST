@@ -86,6 +86,7 @@ from pathlib import Path
 import time
 
 from model_adain import AdaINStyleTransfer
+from model_face_utils import FaceDetector
 
 
 def load_image(image_path, image_size=512):
@@ -202,7 +203,9 @@ def save_image(tensor, output_path):
 
 
 def stylize_single_pair(model, content_path, style_path, output_path, 
-                        image_size=512, alpha=1.0, device='cuda'):
+                        image_size=512, alpha=1.0, device='cuda', 
+                        use_face_aware_adain=False, face_detector=None,
+                        face_preservation_alpha=0.3, face_mask_margin=1.3):
     """
     Stylize a single content-style image pair - THE CORE FUNCTION!
     
@@ -280,9 +283,27 @@ def stylize_single_pair(model, content_path, style_path, output_path,
     
     # Single forward pass with no gradient computation
     with torch.no_grad():
-        # This is where the magic happens!
-        # content + style → stylized image in one forward pass
-        stylized = model(content, style, alpha=alpha)
+        # Two modes: standard AdaIN or face-aware AdaIN
+        if use_face_aware_adain and face_detector is not None:
+            # Face-aware AdaIN: lighter stylization in face regions
+            print("   Using face-aware AdaIN (regional adaptive normalization)")
+            
+            # Generate face mask
+            face_masks = face_detector.generate_face_masks(
+                content, 
+                margin_factor=face_mask_margin
+            )
+            
+            # Perform face-aware style transfer
+            stylized = model.forward_with_face_aware_adain(
+                content, style, face_masks,
+                face_preservation_alpha=face_preservation_alpha,
+                alpha=alpha
+            )
+        else:
+            # Standard AdaIN
+            print("   Using standard AdaIN")
+            stylized = model(content, style, alpha=alpha)
     
     elapsed_time = time.time() - start_time
     print(f"✓ Style transfer completed in {elapsed_time:.3f} seconds")
@@ -296,7 +317,9 @@ def stylize_single_pair(model, content_path, style_path, output_path,
 
 
 def stylize_directory(model, content_dir, style_dir, output_dir,
-                      image_size=512, alpha=1.0, device='cuda'):
+                      image_size=512, alpha=1.0, device='cuda',
+                      use_face_aware_adain=False, face_detector=None,
+                      face_preservation_alpha=0.3, face_mask_margin=1.3):
     """
     Batch processing: Stylize all content images with all style images.
     
@@ -424,7 +447,11 @@ def stylize_directory(model, content_dir, style_dir, output_dir,
                     output_path=output_path,
                     image_size=image_size,
                     alpha=alpha,
-                    device=device
+                    device=device,
+                    use_face_aware_adain=use_face_aware_adain,
+                    face_detector=face_detector,
+                    face_preservation_alpha=face_preservation_alpha,
+                    face_mask_margin=face_mask_margin
                 )
                 processed += 1
             except Exception as e:
@@ -513,6 +540,19 @@ def main():
     parser.add_argument('--alpha', type=float, default=1.0,
                         help='Style strength: 0.0=no style, 0.5=subtle, 1.0=full (default)')
     
+    # ========================================
+    # Face-aware AdaIN arguments
+    # ========================================
+    parser.add_argument('--use-face-aware-adain', action='store_true',
+                        help='Enable face-aware AdaIN (lighter stylization in face regions). '
+                             'Recommended for better identity preservation.')
+    parser.add_argument('--face-preservation-alpha', type=float, default=0.3,
+                        help='Stylization strength in face regions (0.0-1.0). '
+                             'Only used if --use-face-aware-adain is enabled. Default: 0.3')
+    parser.add_argument('--face-mask-margin', type=float, default=1.3,
+                        help='Expand face bounding box by this factor (>= 1.0). '
+                             'Only used if --use-face-aware-adain is enabled. Default: 1.3')
+    
     args = parser.parse_args()
     
     # ============================================================================
@@ -547,6 +587,23 @@ def main():
         print(f"   Trained for {checkpoint['epoch'] + 1} epochs")
     if 'loss' in checkpoint:
         print(f"   Final loss: {checkpoint['loss']:.4f}")
+    
+    # ========================================
+    # Initialize face detector (if face-aware AdaIN enabled)
+    # ========================================
+    face_detector = None
+    if args.use_face_aware_adain:
+        print(f"\nInitializing face detector for face-aware AdaIN...")
+        try:
+            face_detector = FaceDetector(device=device, keep_all=False, min_face_size=20)
+            print("✓ Face detector initialized successfully")
+            print(f"   Face preservation alpha: {args.face_preservation_alpha}")
+            print(f"   Face mask margin: {args.face_mask_margin}x")
+        except ImportError as e:
+            print(f"⚠️  Warning: Could not initialize face detector: {e}")
+            print("   Install facenet-pytorch: pip install facenet-pytorch")
+            print("   Disabling face-aware AdaIN...")
+            args.use_face_aware_adain = False
     
     # ========================================
     # Handle image size
@@ -584,7 +641,11 @@ def main():
             output_path=args.output,
             image_size=image_size,
             alpha=args.alpha,
-            device=device
+            device=device,
+            use_face_aware_adain=args.use_face_aware_adain,
+            face_detector=face_detector,
+            face_preservation_alpha=args.face_preservation_alpha,
+            face_mask_margin=args.face_mask_margin
         )
     
     elif os.path.isdir(args.content) and os.path.isdir(args.style):
@@ -601,7 +662,11 @@ def main():
             output_dir=args.output,
             image_size=image_size,
             alpha=args.alpha,
-            device=device
+            device=device,
+            use_face_aware_adain=args.use_face_aware_adain,
+            face_detector=face_detector,
+            face_preservation_alpha=args.face_preservation_alpha,
+            face_mask_margin=args.face_mask_margin
         )
     
     else:

@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# PyCharm
+.idea/
+
+# VS Code
+.vscode/
+
+# macOS
+.DS_Store
+
+# Training/temporary files
+nohup.out
+*.log
+
+# Large checkpoint files (keep only essential ones)
+# Uncomment if you want to exclude all checkpoints from git
+# checkpoints/**/*.pth
+
+# Temporary result files
+*.tmp
+*.bak
+*~
+
