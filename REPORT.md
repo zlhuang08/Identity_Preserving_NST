@@ -56,18 +56,132 @@ We address these challenges through:
 
 ### 1.3 Related Work
 
-- **Gatys et al. [1]:** Original optimization-based NST (30-60s per image)
-- **Johnson et al. [2]:** Feed-forward networks for fast style transfer
-- **Huang & Belongie [3]:** AdaIN for arbitrary style transfer in real-time
-- **Schroff et al. [4]:** FaceNet for face recognition via embeddings
+Our work builds upon and addresses limitations in three main research areas:
 
-Our work combines AdaIN's speed with FaceNet's identity representation.
+**1. Neural Style Transfer**
+
+- **Gatys et al. [1]:** Original optimization-based NST iteratively optimizes pixel values to match content and style statistics. Achieves high-quality results but requires 30-60s per image due to iterative optimization, making it impractical for real-time applications.
+  
+- **Johnson et al. [2]:** Introduced feed-forward networks for fast style transfer, reducing inference to ~0.1s per image. However, requires training a separate network per style, limiting scalability to arbitrary styles.
+  
+- **Huang & Belongie [3] - AdaIN:** Our baseline method. Enables arbitrary style transfer in real-time by aligning feature statistics via Adaptive Instance Normalization. **Limitation:** Uniform stylization across entire image causes facial distortion in portraits, as faces are stylized as aggressively as backgrounds.
+
+**2. Face Recognition and Identity Preservation**
+
+- **Schroff et al. [4] - FaceNet:** Deep learning approach to face recognition using triplet loss to learn discriminative 512-dimensional embeddings. Achieves state-of-the-art accuracy on LFW benchmark (99.63%).
+  
+- **Cao et al. [6] - VGGFace2:** Large-scale face recognition dataset (3.31M images, 9131 identities) enabling robust face recognition across pose and age variations. Our identity loss uses InceptionResnetV1 pretrained on this dataset.
+
+**Limitation of using face recognition alone:** While face embeddings capture overall identity, optimizing for embedding similarity alone can lead to loss function conflicts when combined with style transfer objectives. Our comprehensive γ tuning (Section 3.4) reveals that identity loss must be carefully balanced (3-15% of total loss) to be effective.
+
+**3. Regional Adaptive Processing**
+
+- **Ulyanov et al. [9] - Improved Texture Networks:** Demonstrated that multi-scale processing and Instance Normalization improve detail preservation in texture synthesis. Inspired our face-aware AdaIN approach.
+
+**Our Key Insight:** Combining **direct spatial control** (face-aware AdaIN) with **global embedding constraints** (identity loss) and **targeted refinement** (eye-specific loss) achieves superior results. Our ablation studies (Section 3.5) show that regional adaptive normalization outperforms global loss optimization (+8.9% vs. +2.2%), validating the principle that spatial awareness is crucial for structured content preservation.
+
+**Gap Addressed:** Prior style transfer methods either sacrifice identity for style quality (AdaIN) or require slow optimization (Gatys et al.). Our work achieves both strong stylization and identity preservation in real-time (~0.03-0.13s per image), making it suitable for interactive portrait applications such as children's book illustration.
 
 ---
 
 ## 2. Methods
 
 ### 2.1 Model Architecture
+
+**Overview:** Our model consists of a frozen VGG19 encoder, an Adaptive Instance Normalization (AdaIN) layer, and a trainable decoder. For identity preservation, we add three complementary loss functions computed on the generated output.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                          TRAINING PIPELINE                           │
+└─────────────────────────────────────────────────────────────────────┘
+
+Content Image (256×256×3)          Style Image (256×256×3)
+         │                                   │
+         ├──────────────┬────────────────────┤
+         │              │                    │
+         ▼              ▼                    ▼
+   ┌──────────┐   ┌──────────┐        ┌──────────┐
+   │  VGG19   │   │  VGG19   │        │  VGG19   │
+   │ Encoder  │   │ Encoder  │        │ Encoder  │
+   │ (frozen) │   │ (frozen) │        │ (frozen) │
+   └──────────┘   └──────────┘        └──────────┘
+         │              │                    │
+         │ relu4_1      │ relu4_1            │ relu1-4
+         │ (256 ch)     │ (256 ch)           │
+         │              │                    │
+         └──────┬───────┘                    │
+                │                            │
+                ▼                            ▼
+         ┌─────────────┐            ┌──────────────┐
+         │    AdaIN    │            │ Gram Matrix  │
+         │  Transform  │            │ Statistics   │
+         └─────────────┘            │ (μ, σ)       │
+                │                   └──────────────┘
+                │ Transformed              │
+                │ Features                 │
+                │                          │
+                ▼                          │
+         ┌─────────────┐                  │
+         │   Decoder   │                  │
+         │ (trainable) │                  │
+         │  3.5M params│                  │
+         └─────────────┘                  │
+                │                         │
+                ▼                         │
+    Generated Image (256×256×3)          │
+                │                         │
+                ├─────────┬───────────────┴──────────┬──────────────┐
+                │         │                          │              │
+                ▼         ▼                          ▼              ▼
+         ┌──────────┐ ┌────────────┐        ┌────────────┐  ┌──────────┐
+         │ Content  │ │   Style    │        │  Identity  │  │   Eye    │
+         │   Loss   │ │   Loss     │        │   Loss     │  │  Loss    │
+         │  (L2 on  │ │ (L2 on Gram│        │ (L2 on face│  │ (L2 on   │
+         │ relu4_1) │ │  matrices) │        │ embeddings)│  │eye patch)│
+         └──────────┘ └────────────┘        └────────────┘  └──────────┘
+              │              │                     │              │
+              │ λ=1.0        │ λ=10.0              │ γ=1000       │ β=100
+              │              │                     │              │
+              └──────────────┴─────────────────────┴──────────────┘
+                                     │
+                                     ▼
+                           L_total = L_content + 10·L_style 
+                                   + 1000·L_identity + 100·L_eye
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                      FACE-AWARE AdaIN (Optional)                     │
+└─────────────────────────────────────────────────────────────────────┘
+
+After AdaIN Transform:
+    ┌─────────────────────────────────────────┐
+    │  Detect face region using MTCNN         │
+    │  Generate soft mask (Gaussian blur)     │
+    │  Blend features:                        │
+    │    f_face = α·f_style + (1-α)·f_content │
+    │    f_background = f_style               │
+    │    f_output = mask·f_face +             │
+    │               (1-mask)·f_background     │
+    └─────────────────────────────────────────┘
+              │ α=0.3 (face preservation)
+              ▼
+          To Decoder
+```
+
+**Key Components:**
+
+1. **Encoder (VGG19, frozen):** Extracts multi-scale features from relu1_1, relu2_1, relu3_1, relu4_1
+2. **AdaIN Transform:** Aligns content feature statistics with style feature statistics
+3. **Decoder (trainable):** Reconstructs stylized image from transformed features
+4. **Loss Functions:**
+   - **Content Loss** (λ=1.0): Preserves spatial structure via relu4_1 features
+   - **Style Loss** (λ=10.0): Transfers artistic style via Gram matrix statistics across multiple layers
+   - **Identity Loss** (γ=1000): Preserves facial identity via FaceNet embeddings
+   - **Eye Loss** (β=100): Preserves fine-grained eye features via VGG features on 48×48 patches
+
+**Model Statistics:**
+- Total parameters: 7.0M (encoder: 3.5M frozen, decoder: 3.5M trainable)
+- Input/Output resolution: 256×256 pixels (training), 512×512 (inference)
+- Inference time: ~0.03-0.13 seconds per image on NVIDIA A6000
 
 #### 2.1.1 Encoder
 
@@ -202,25 +316,96 @@ Standard AdaIN applies uniform stylization across the entire image. However, for
 ### 2.5 Dataset
 
 **Ethical Compliance:**
-We use 100% synthetic faces from StyleGAN [8] via ThisPersonDoesNotExist.com:
-- **200 synthetic content images** (512×512) split following CS230 guidelines:
-  - **Training:** 120 images (60%)
-  - **Validation:** 40 images (20%)
-  - **Test:** 40 images (20%, includes face_00010 and face_00066)
-- **2 primary evaluation images** (face_00010 girl, face_00066 boy) for final results
-- **21 style images** covering diverse artistic periods:
-  - **Van Gogh (3):** Starry Night, Sunflowers, Café Terrace
-  - **Monet (3):** Water Lilies, Impression Sunrise, Original
-  - **Munch (1):** The Scream (Expressionism)
-  - **Hokusai (1):** Great Wave (Japanese Ukiyo-e)
-  - **Klimt (1):** The Kiss (Art Nouveau)
-  - **Seurat (1):** Sunday Afternoon (Pointillism)
-  - **Textures (3):** Drop of Water, Sandstone, Stone
-  - **Children's Book Styles (8):** Beatrix Potter (Peter Rabbit), Kate Greenaway, Paul Klee, Audubon, Dürer, Winslow Homer (3)
-- No real people's photographs
-- No privacy or legal concerns
-- **Total training combinations:** 4,200 (200 faces × 21 styles)
-- **Evaluation combinations:** 42 (2 faces × 21 styles)
+We use 100% synthetic faces from StyleGAN [8] via ThisPersonDoesNotExist.com to avoid privacy concerns associated with real human photographs.
+
+#### 2.5.1 Content Images (Synthetic Faces)
+
+**Dataset Size:** 200 high-quality synthetic face images (512×512 resolution)
+
+**Data Split (CS230 Guidelines):**
+- **Training Set:** 120 images (60%) - Used for model training
+- **Validation Set:** 40 images (20%) - Used for hyperparameter tuning and model selection
+- **Test Set:** 40 images (20%) - Used for final evaluation
+  - Includes 2 primary evaluation faces: `face_00010` (girl) and `face_00066` (boy)
+
+**Dataset Characteristics:**
+- **Diversity:** Varied age, gender, ethnicity, facial expressions, and lighting conditions
+- **Quality:** High-resolution (512×512), photo-realistic images
+- **Consistency:** All faces generated by same StyleGAN model ensuring consistent quality
+- **Ethical:** No real people involved, no privacy concerns, freely shareable
+
+**Generation Process:**
+- Generated using `data_generate_faces.py` script
+- Source: ThisPersonDoesNotExist.com API
+- Smart resume functionality ensures no duplicate images
+- Automated verification of face detectability (MTCNN validation)
+
+**Sample Content Images:**
+```
+[face_00010]  [face_00023]  [face_00066]  [face_00089]
+   (girl)       (woman)        (boy)         (man)
+```
+*Representative samples showing diversity in age, gender, and facial features from our synthetic face dataset. All faces are photorealistic and consistently high-quality.*
+
+#### 2.5.2 Style Images
+
+**Dataset Size:** 21 artistic style images covering diverse artistic periods and techniques
+
+**Style Categories:**
+
+1. **Famous Masters (13 styles):**
+   - **Van Gogh:** Starry Night, Sunflowers, Café Terrace at Night (Post-Impressionism)
+   - **Monet:** Water Lilies, Impression Sunrise, Original (Impressionism)
+   - **Munch:** The Scream (Expressionism)
+   - **Hokusai:** Great Wave off Kanagawa (Japanese Ukiyo-e)
+   - **Klimt:** The Kiss (Art Nouveau)
+   - **Seurat:** Sunday Afternoon on the Island of La Grande Jatte (Pointillism)
+   - **Textures:** Drop of Water, Sandstone, Stone (Abstract patterns)
+
+2. **Children's Book Illustrations (8 styles):**
+   - **Beatrix Potter:** Peter Rabbit (delicate watercolor)
+   - **Kate Greenaway:** Christmas illustration (soft watercolor)
+   - **Paul Klee:** Castle and Sun (whimsical abstract)
+   - **John James Audubon:** Flamingo (nature illustration, watercolor)
+   - **Albrecht Dürer:** Hare (detailed pen and ink)
+   - **Winslow Homer:** Children on Beach, Boys and Kitten, Girl on Swing (loose watercolor sketches)
+
+**Why Children's Book Styles?**
+- Target application: Portrait stylization for children's book illustrations
+- Require strong identity preservation (characters must remain recognizable across pages)
+- Test diverse artistic techniques (watercolor, pen & ink, sketching)
+
+**Sample Style Images:**
+```
+[Starry Night]  [Peter Rabbit]  [Great Wave]  [The Scream]
+ (Van Gogh)      (Potter)       (Hokusai)      (Munch)
+```
+*Representative samples showing diversity from painterly impressionism to children's book illustrations.*
+
+#### 2.5.3 Dataset Statistics and Challenges
+
+**Training Combinations:**
+- Total unique pairs: 4,200 (200 content × 21 styles)
+- Training pairs per epoch: 2,520 (120 content × 21 styles)
+- Validation pairs per epoch: 840 (40 content × 21 styles)
+- Final evaluation: 42 combinations (2 faces × 21 styles)
+
+**Key Challenges:**
+1. **Style Diversity:** Extreme variation from photorealistic textures to abstract expressionism tests model generalization
+2. **Identity Preservation vs. Stylization Trade-off:** Strong artistic styles (e.g., The Scream, Starry Night) aggressively transform facial features
+3. **Face Detection Robustness:** Heavily stylized outputs may fail face detection, complicating identity loss computation
+4. **Limited Evaluation Set:** Only 2 primary test faces require careful hyperparameter tuning to avoid overfitting
+
+**Data Augmentation:**
+- None applied to content images (synthetic faces already diverse)
+- Exhaustive pairing ensures each content image sees all 21 styles per epoch
+- Style order randomized each epoch for stochastic gradient descent
+
+**Reproducibility:**
+- All 200 synthetic faces stored in `data/content/`
+- Train/val/test split indices stored in `data/content_splits/`
+- Style images stored in `data/style/` with source attribution
+- Generation scripts provided for reproducibility
 
 ---
 
@@ -238,9 +423,11 @@ Both models were trained for 20 epochs on 200 synthetic faces with 21 artistic s
 
 Before training the final models, we conducted a systematic learning rate sweep to determine the optimal learning rate for convergence. We tested 5 learning rates: 1e-5, 3e-5, 1e-4, 3e-4, and 1e-3, training each for 10 epochs on the full dataset (120 content × 21 styles = 2,520 training pairs per epoch).
 
-![Learning Rate Comparison](results/hyperparameter_tuning/learning_rate_comparison.png)
+**Figure 5: Learning Rate Comparison**
 
-**Figure 1:** Training and validation loss curves for different learning rates (log scale). The baseline model (γ=0.0) was trained with batch size 64 for 10 epochs to evaluate convergence behavior.
+![Learning Rate Comparison](results/hyperparameter_tuning/learning_rate_comparison_combined.png)
+
+*Training and validation loss curves for different learning rates (log scale y-axis). The baseline model (γ=0.0) was trained with batch size 64 for 10 epochs. LR=1e-4 (highlighted in red) achieves the lowest validation loss with stable convergence, while LR=1e-3 diverges and LR=1e-5 converges too slowly.*
 
 **Results:**
 
@@ -248,7 +435,7 @@ Before training the final models, we conducted a systematic learning rate sweep 
 |---------------|------------------|----------------|------------------|-----------|
 | 1e-5 | 62.25 | 61.10 | 147.65 | High (too slow) |
 | 3e-5 | 45.18 | 44.61 | 118.25 | High |
-| **1e-4** ⭐ | **31.89** | **31.94** | **103.85** | **Good** |
+| **1e-4** ⭐ | **31.89** | **31.94** | **103.85** | **Good** ✅ |
 | 3e-4 | 33.87 | 38.30 | 144.91 | Medium |
 | 1e-3 | 221.79 | 220.85 | 12890.99 | Very low (unstable) |
 
@@ -266,9 +453,11 @@ Before training the final models, we conducted a systematic learning rate sweep 
 
 After determining the optimal learning rate, we conducted a systematic study of content/style weight ratios to validate our choice of 1:10 (λ_content=1.0, λ_style=10.0). We tested 5 different ratios: 1:1, 1:5, 1:10, 1:20, and 1:50, training each for 10 epochs.
 
-![Weight Ratio Comparison](results/hyperparameter_tuning/weight_comparison.png)
+**Figure 6: Content/Style Weight Pareto Trade-off**
 
-**Figure 2:** Pareto trade-off curve showing content loss vs. style loss for different weight ratios (left), and total loss comparison (right). The 1:10 ratio provides the optimal balance.
+![Weight Ratio Comparison](results/hyperparameter_tuning/weight_pareto_only.png)
+
+*Pareto trade-off curve showing content loss vs. style loss for different weight ratios. The 1:10 ratio (highlighted) sits at the "knee" of the curve, providing the optimal balance: moving to 1:5 sacrifices too much style quality (-20% style loss improvement vs +26% content cost is worthwhile), while moving to 1:20 provides diminishing returns (-6% style vs +20% content cost is not worthwhile). This empirically validates the industry standard 1:10 ratio used in AdaIN and Fast Style Transfer papers.*
 
 **Results:**
 
@@ -276,9 +465,9 @@ After determining the optimal learning rate, we conducted a systematic study of 
 |-------|------------------|------------------|----------------|---------|
 | 1:1 | 11.22 | 6.72 | 4.50 | Equal (weak style) |
 | 1:5 | 22.79 | 13.22 | 1.91 | Content-focused |
-| **1:10** ⭐ | **31.96** | **16.68** | **1.53** | **Optimal** |
+| **1:10** ⭐ | **31.96** | **16.68** | **1.53** | **Optimal** ✅ |
 | 1:20 | 48.77 | 20.00 | 1.44 | Style-focused |
-| 1:50 | 91.68 | 21.22 | 1.41 | Maximum style |
+| 1:50 | 91.68 | 21.22 | **1.41** | Maximum style |
 
 **Key Findings:**
 
@@ -387,22 +576,61 @@ Percentage of stylized images where faces remain detectable by MTCNN. Higher rat
 
 #### 3.3.3 Qualitative Analysis
 
-Visual inspection of results (see comparison grids in `results/model_progression/comparisons/`) reveals:
+Visual inspection of results demonstrates the progressive improvement of our three complementary methods.
 
-**Identity-Preserving Model (γ=0.1):**
-- ✅ Eye position and shape preserved
-- ✅ Nose structure recognizable
-- ✅ Mouth/lip contours maintained
-- ✅ Overall face geometry intact
-- ✅ Artistic style successfully applied
-- ✅ Good balance between identity and stylization
+**Figure 1: Progressive Identity Preservation (face_00010 + Starry Night)**
+
+![Progressive Comparison](results/model_progression/comparisons/progression_face_00010_starry_night.png)
+
+*2×3 comparison grid showing: (Row 1) Content image, Style image, Baseline (γ=0); (Row 2) Identity (γ=1000), Face-Aware+Identity (α=0.3, γ=1000), All Three Combined (+ β=100). Each stylized image includes quantitative metrics (SSIM, Perceptual Similarity, Face Similarity). Notable observations: Baseline achieves strong stylization but loses facial features; Identity loss improves face similarity slightly; Face-Aware dramatically improves identity preservation while maintaining style; Eye-specific loss provides subtle refinement of eye features.*
+
+**Figure 2: Children's Book Style Application (face_00010 + Peter Rabbit)**
+
+![Peter Rabbit Comparison](results/model_progression/comparisons/progression_face_00010_peter_rabbit.png)
+
+*Comparison with Beatrix Potter's watercolor style. This demonstrates our target application: children's book illustration where character identity must remain consistent across pages. Face-Aware AdaIN preserves the girl's facial structure while successfully applying the delicate watercolor aesthetic.*
+
+**Figure 3: Abstract Expressionism Challenge (face_00066 + The Scream)**
+
+![The Scream Comparison](results/model_progression/comparisons/progression_face_00066_the_scream.png)
+
+*Extreme stylization test with Edvard Munch's expressionist style. Even with aggressive artistic transformation, our combined method maintains recognizable facial features. This demonstrates robustness across diverse artistic styles.*
+
+**Key Observations Across All 42 Test Cases:**
 
 **Baseline Model (γ=0.0):**
-- ✓ Strong artistic stylization
-- ✓ Good color and texture transfer
-- ✓ Comparable visual quality to identity model
-- ~ Slightly more aggressive stylization
-- ~ Faces still recognizable but with less structural preservation
+- ✓ Strong artistic stylization with vibrant colors and textures
+- ✓ Good perceptual similarity to style image
+- ✓ Fast inference (~0.03s per image)
+- ~ Facial features heavily distorted in abstract styles
+- ~ Identity not prioritized, faces may become unrecognizable
+
+**Identity Loss Only (γ=1000):**
+- ✅ Improved face similarity (+2.2% vs baseline)
+- ✅ Facial structure better preserved
+- ✓ Still maintains good stylization quality
+- ~ Improvement modest compared to face-aware methods
+- ~ Global optimization less effective than spatial control
+
+**Face-Aware + Identity (α=0.3, γ=1000):**
+- ✅✅ Dramatic face similarity improvement (+8.9% vs baseline)
+- ✅ Smooth transitions between face and background regions
+- ✅ Background fully stylized, face lightly stylized
+- ✅ Best balance of identity and artistic effect
+- ✓ No significant computational overhead at inference
+
+**All Three Combined (+ Eye-Specific β=100):**
+- ✅✅✅ Highest face similarity (76.6%, +22.4% vs baseline)
+- ✅ Subtle but noticeable eye feature preservation
+- ✅ Most recognizable faces across all styles
+- ~ Slightly lower perceptual similarity (0.451 vs 0.512)
+- ~ Training time increased (~2.5 hours vs ~45 minutes)
+
+**Failure Cases and Limitations:**
+- Heavy abstract styles (e.g., very thick brushstrokes) can still cause some facial distortion
+- Face detection occasionally fails on extremely stylized outputs, preventing identity loss computation
+- Eye-specific loss provides minimal visible improvement on low-resolution images
+- Trade-off: Higher identity preservation sometimes reduces artistic authenticity
 
 ### 3.4 Ablation Study: Identity Weight (γ) — Complete Analysis
 
@@ -432,6 +660,12 @@ We conducted a comprehensive investigation of identity weight γ across **8 orde
 **2. "U-Curve" Pattern Emerges**
 
 The relationship between γ and face similarity is **non-monotonic**:
+
+**Figure 4: Identity Weight U-Curve Phenomenon**
+
+![U-Curve Analysis](results/hyperparameter_tuning/milestone_ucurve_analysis.png)
+
+*Identity weight (γ) exhibits a "U-curve" pattern across 8 orders of magnitude. Face similarity initially drops below baseline for γ=0.1-10 (Noise Region), rises to peak at γ=1000 (Signal Region), then collapses for γ>1000 (Domination Region). The bottom subplot shows identity loss contribution to total loss, explaining why intermediate values fail (< 1% contribution = noise) while extreme values also fail (> 50% contribution = dominates other objectives). This finding is critical for practitioners: identity loss must be 3-15% of total loss to be effective.*
 
 ```
 Low γ (0.1-10):   ❌ Hurts performance (worse than baseline)
