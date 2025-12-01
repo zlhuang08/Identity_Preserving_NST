@@ -84,9 +84,11 @@ import argparse
 import os
 from pathlib import Path
 import time
+import json
 
 from model_adain import AdaINStyleTransfer
 from model_face_utils import FaceDetector
+from evaluation_metrics_utility import MetricsCalculator
 
 
 def load_image(image_path, image_size=512):
@@ -205,7 +207,8 @@ def save_image(tensor, output_path):
 def stylize_single_pair(model, content_path, style_path, output_path, 
                         image_size=512, alpha=1.0, device='cuda', 
                         use_face_aware_adain=False, face_detector=None,
-                        face_preservation_alpha=0.3, face_mask_margin=1.3):
+                        face_preservation_alpha=0.3, face_mask_margin=1.3,
+                        metrics_calculator=None):
     """
     Stylize a single content-style image pair - THE CORE FUNCTION!
     
@@ -216,7 +219,8 @@ def stylize_single_pair(model, content_path, style_path, output_path,
     1. Load and preprocess content and style images
     2. Move tensors to GPU (if available)
     3. Single forward pass through model: Encode → AdaIN → Decode
-    4. Save stylized output
+    4. Compute metrics IMMEDIATELY (on tensor, before saving to avoid compression artifacts)
+    5. Save stylized output and metrics JSON
     
     TYPICAL TIMING:
     - 512×512 images on GPU: ~0.1 seconds
@@ -240,6 +244,8 @@ def stylize_single_pair(model, content_path, style_path, output_path,
               0.5 = subtle style (half-way blend)
               1.0 = full style (maximum artistic effect)
         device: Device to run on ('cuda' or 'cpu')
+        metrics_calculator: MetricsCalculator instance (optional)
+                           If provided, metrics will be computed and saved
     
     Returns:
         stylized: (1, 3, H, W) tensor of stylized image
@@ -309,7 +315,54 @@ def stylize_single_pair(model, content_path, style_path, output_path,
     print(f"✓ Style transfer completed in {elapsed_time:.3f} seconds")
     
     # ========================================
-    # Step 3: Save result
+    # Step 3: Compute metrics (BEFORE saving to avoid compression artifacts)
+    # ========================================
+    if metrics_calculator is not None:
+        print("Computing metrics by generating at 256×256 (matching training resolution)...")
+        metrics_start = time.time()
+        
+        # IMPORTANT: Generate at 256×256 DIRECTLY, don't downsample!
+        # Downsampling destroys facial features. We need to run the model again at 256×256.
+        content_256 = load_image(content_path, image_size=256).to(device)
+        style_256 = load_image(style_path, image_size=256).to(device)
+        
+        # Generate stylized image at 256×256 (for metrics only, not saved)
+        with torch.no_grad():
+            if use_face_aware_adain and face_detector is not None:
+                face_masks_256 = face_detector.generate_face_masks(
+                    content_256, 
+                    margin_factor=face_mask_margin
+                )
+                stylized_256 = model.forward_with_face_aware_adain(
+                    content_256, style_256, face_masks_256,
+                    face_preservation_alpha=face_preservation_alpha,
+                    alpha=alpha
+                )
+            else:
+                stylized_256 = model(content_256, style_256, alpha=alpha)
+        
+        # Compute metrics on 256×256 tensors
+        metrics = metrics_calculator.compute_all_metrics(content_256, stylized_256)
+        
+        metrics_elapsed = time.time() - metrics_start
+        print(f"✓ Metrics computed in {metrics_elapsed:.3f} seconds")
+        
+        # Format face similarity for display
+        if metrics['face'] is not None:
+            face_display = f"{metrics['face']:.4f}"
+        else:
+            face_display = "N/A"
+        
+        print(f"   SSIM: {metrics['ssim']:.4f}, Perceptual: {metrics['perceptual']:.4f}, Face: {face_display}")
+        
+        # Save metrics to JSON (same name as output image)
+        metrics_path = str(output_path).rsplit('.', 1)[0] + '_metrics.json'
+        with open(metrics_path, 'w') as f:
+            json.dump(metrics, f, indent=2)
+        print(f"✓ Saved metrics to: {metrics_path}")
+    
+    # ========================================
+    # Step 4: Save result (1024×1024 for visualization)
     # ========================================
     save_image(stylized, output_path)
     
@@ -319,7 +372,8 @@ def stylize_single_pair(model, content_path, style_path, output_path,
 def stylize_directory(model, content_dir, style_dir, output_dir,
                       image_size=512, alpha=1.0, device='cuda',
                       use_face_aware_adain=False, face_detector=None,
-                      face_preservation_alpha=0.3, face_mask_margin=1.3):
+                      face_preservation_alpha=0.3, face_mask_margin=1.3,
+                      metrics_calculator=None):
     """
     Batch processing: Stylize all content images with all style images.
     
@@ -358,6 +412,8 @@ def stylize_directory(model, content_dir, style_dir, output_dir,
         image_size: Size to resize images to (default: 512)
         alpha: Style strength (default: 1.0)
         device: Device to run on ('cuda' or 'cpu')
+        metrics_calculator: MetricsCalculator instance (optional)
+                           If provided, metrics will be computed and saved
     
     Example:
         # Generate all combinations (eval images × all styles)
@@ -451,7 +507,8 @@ def stylize_directory(model, content_dir, style_dir, output_dir,
                     use_face_aware_adain=use_face_aware_adain,
                     face_detector=face_detector,
                     face_preservation_alpha=face_preservation_alpha,
-                    face_mask_margin=face_mask_margin
+                    face_mask_margin=face_mask_margin,
+                    metrics_calculator=metrics_calculator
                 )
                 processed += 1
             except Exception as e:
@@ -606,6 +663,15 @@ def main():
             args.use_face_aware_adain = False
     
     # ========================================
+    # Initialize metrics calculator
+    # ========================================
+    print(f"\nInitializing metrics calculator...")
+    metrics_calculator = MetricsCalculator(device=device)
+    print("✓ Metrics calculator initialized successfully")
+    print("   Metrics will be computed on tensors (before saving)")
+    print("   This ensures consistency with training metrics!")
+    
+    # ========================================
     # Handle image size
     # ========================================
     # 0 means use original image size (no resizing)
@@ -645,7 +711,8 @@ def main():
             use_face_aware_adain=args.use_face_aware_adain,
             face_detector=face_detector,
             face_preservation_alpha=args.face_preservation_alpha,
-            face_mask_margin=args.face_mask_margin
+            face_mask_margin=args.face_mask_margin,
+            metrics_calculator=metrics_calculator
         )
     
     elif os.path.isdir(args.content) and os.path.isdir(args.style):
@@ -666,7 +733,8 @@ def main():
             use_face_aware_adain=args.use_face_aware_adain,
             face_detector=face_detector,
             face_preservation_alpha=args.face_preservation_alpha,
-            face_mask_margin=args.face_mask_margin
+            face_mask_margin=args.face_mask_margin,
+            metrics_calculator=metrics_calculator
         )
     
     else:

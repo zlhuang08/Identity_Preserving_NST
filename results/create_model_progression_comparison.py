@@ -5,102 +5,63 @@ Create final 6-image comparison grids showing progressive improvements:
 (2,1) 1_identity | (2,2) 2_face_aware_plus_identity | (2,3) 3_all_combined
 
 With full metrics (SSIM, Perceptual Sim, Face Sim) on each generated image.
+
+IMPORTANT: This script now loads PRE-COMPUTED metrics from JSON files!
+Metrics are computed during inference (eval_inference.py) on tensors BEFORE saving,
+ensuring consistency with training metrics and avoiding compression artifacts.
 """
 
-import torch
 import sys
 from pathlib import Path
 import matplotlib.pyplot as plt
 from PIL import Image
-import numpy as np
-from torchvision.models import vgg19
+import json
 
-# Add parent directory to path
-sys.path.append(str(Path(__file__).parent.parent))
-
-from model_face_utils import FaceDetector, FaceRecognizer
+# No need for torch, model_face_utils, or torchvision imports anymore!
 
 def load_image_pil(path):
     """Load image as PIL Image"""
     return Image.open(path).convert('RGB')
 
-def load_image_tensor(path, device='cuda', target_size=512):
-    """Load image as normalized tensor [0,1], resized to target_size"""
-    img = Image.open(path).convert('RGB')
-    # Resize to target size
-    img = img.resize((target_size, target_size), Image.Resampling.LANCZOS)
-    img = np.array(img).astype(np.float32) / 255.0
-    img = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0)
-    return img.to(device)
-
-def compute_ssim(img1, img2):
-    """Compute Structural Similarity Index (SSIM) between two images"""
-    # Simple SSIM implementation using L1/L2 norms as proxy
-    # For proper SSIM, would need pytorch-msssim package
-    # Here we use MSE-based similarity as approximation
-    mse = torch.nn.functional.mse_loss(img1, img2).item()
-    # Convert MSE to similarity score (0-1 range)
-    # Lower MSE = higher similarity
-    similarity = np.exp(-mse * 10)  # Scale factor for reasonable range
-    return similarity
-
-def compute_perceptual_similarity(img1, img2, vgg_model):
-    """Compute perceptual similarity using VGG features"""
-    # Normalize for VGG
-    mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to(img1.device)
-    std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to(img1.device)
+def load_precomputed_metrics(image_path):
+    """
+    Load pre-computed metrics from JSON file.
     
-    img1_norm = (img1 - mean) / std
-    img2_norm = (img2 - mean) / std
+    During inference, metrics are computed on the tensor (before saving)
+    and stored in a JSON file. This ensures:
+    - Consistency with training metrics (no compression artifacts)
+    - Faster comparison grid generation (no recomputation needed)
+    - Reliability (exact same calculation pipeline)
     
-    # Extract features
-    features1 = vgg_model(img1_norm)
-    features2 = vgg_model(img2_norm)
+    Args:
+        image_path: Path to the generated image (e.g., face_00010_starry_night.png)
     
-    # Compute MSE in feature space
-    mse = torch.nn.functional.mse_loss(features1, features2).item()
+    Returns:
+        tuple: (ssim, perceptual_sim, face_sim) or None if metrics file not found
+    """
+    # Construct metrics path (same name, but _metrics.json)
+    metrics_path = str(image_path).rsplit('.', 1)[0] + '_metrics.json'
     
-    # Convert to similarity score (lower MSE = higher similarity)
-    # Use exponential decay: similarity = exp(-mse/scale)
-    scale = 10.0
-    similarity = np.exp(-mse / scale)
-    
-    return similarity
-
-def compute_metrics(content_path, generated_path, face_detector, face_recognizer, vgg, device='cuda'):
-    """Compute all metrics for a generated image"""
-    content_tensor = load_image_tensor(content_path, device)
-    generated_tensor = load_image_tensor(generated_path, device)
-    
-    # SSIM
-    ssim = compute_ssim(content_tensor, generated_tensor)
-    
-    # Perceptual Similarity
-    perceptual_sim = compute_perceptual_similarity(content_tensor, generated_tensor, vgg)
-    
-    # Face Similarity
     try:
-        content_embedding = face_recognizer.extract_embeddings(content_tensor, face_detector)
-        gen_embedding = face_recognizer.extract_embeddings(generated_tensor, face_detector)
+        with open(metrics_path, 'r') as f:
+            metrics = json.load(f)
         
-        if content_embedding is not None and gen_embedding is not None:
-            face_sim = torch.nn.functional.cosine_similarity(
-                content_embedding, gen_embedding, dim=1
-            ).item()
-        else:
-            face_sim = 0.0
-    except:
-        face_sim = 0.0
-    
-    return ssim, perceptual_sim, face_sim
+        ssim = metrics.get('ssim', 0.0)
+        perceptual = metrics.get('perceptual', 0.0)
+        face = metrics.get('face', 0.0) if metrics.get('face') is not None else 0.0
+        
+        return ssim, perceptual, face
+    except FileNotFoundError:
+        print(f"⚠️  Warning: Metrics file not found: {metrics_path}")
+        print("    Metrics were not computed during inference!")
+        return None
 
 def create_progression_comparison(content_name, style_name, 
                                    content_dir, style_dir,
                                    baseline_dir, identity_dir,
                                    face_aware_dir, all_combined_dir,
-                                   output_path,
-                                   face_detector, face_recognizer, vgg):
-    """Create 2×3 comparison grid"""
+                                   output_path):
+    """Create 2×3 comparison grid with pre-computed metrics"""
     
     # Load original images
     content_path = content_dir / f"{content_name}.jpg"
@@ -117,13 +78,18 @@ def create_progression_comparison(content_name, style_name,
             print(f"⚠️  Missing file: {path}")
             return False
     
-    # Compute metrics for all generated images
-    print(f"  Computing metrics for {content_name} + {style_name}...")
+    # Load PRE-COMPUTED metrics (computed during inference on tensors!)
+    print(f"  Loading pre-computed metrics for {content_name} + {style_name}...")
     
-    baseline_metrics = compute_metrics(content_path, baseline_path, face_detector, face_recognizer, vgg)
-    identity_metrics = compute_metrics(content_path, identity_path, face_detector, face_recognizer, vgg)
-    face_aware_metrics = compute_metrics(content_path, face_aware_path, face_detector, face_recognizer, vgg)
-    all_combined_metrics = compute_metrics(content_path, all_combined_path, face_detector, face_recognizer, vgg)
+    baseline_metrics = load_precomputed_metrics(baseline_path)
+    identity_metrics = load_precomputed_metrics(identity_path)
+    face_aware_metrics = load_precomputed_metrics(face_aware_path)
+    all_combined_metrics = load_precomputed_metrics(all_combined_path)
+    
+    # Check if all metrics were found
+    if None in [baseline_metrics, identity_metrics, face_aware_metrics, all_combined_metrics]:
+        print(f"⚠️  Missing metrics files! Run inference with metrics calculation first.")
+        return False
     
     # Load images
     content_img = load_image_pil(content_path)
@@ -147,51 +113,43 @@ def create_progression_comparison(content_name, style_name,
     axes[0, 1].set_title('Style Image', fontsize=14, fontweight='bold', pad=10)
     axes[0, 1].axis('off')
     
-    # Row 1, Col 3: Baseline (γ=0)
+    # Row 1, Col 3: Baseline
     axes[0, 2].imshow(baseline_img)
-    title_baseline = (f'Step 0: Baseline (AdaIN only)\n'
+    title_baseline = (f'Baseline\n'
                       f'SSIM: {baseline_metrics[0]:.3f} | '
                       f'Percep: {baseline_metrics[1]:.3f} | '
                       f'Face: {baseline_metrics[2]:.3f}')
     axes[0, 2].set_title(title_baseline, fontsize=12, fontweight='bold', pad=10)
     axes[0, 2].axis('off')
     
-    # Row 2, Col 1: Identity (γ=1000)
+    # Row 2, Col 1: Identity
     axes[1, 0].imshow(identity_img)
-    face_diff_1 = identity_metrics[2] - baseline_metrics[2]
-    title_identity = (f'Step 1: + Identity Loss (γ=1000)\n'
+    title_identity = (f'+ Identity Loss\n'
                       f'SSIM: {identity_metrics[0]:.3f} | '
                       f'Percep: {identity_metrics[1]:.3f} | '
-                      f'Face: {identity_metrics[2]:.3f} ({face_diff_1:+.3f})')
+                      f'Face: {identity_metrics[2]:.3f}')
     axes[1, 0].set_title(title_identity, fontsize=12, fontweight='bold', pad=10)
     axes[1, 0].axis('off')
     
     # Row 2, Col 2: Face-aware + Identity
     axes[1, 1].imshow(face_aware_img)
-    face_diff_2 = face_aware_metrics[2] - baseline_metrics[2]
-    title_face_aware = (f'Step 2: + Face-Aware AdaIN (α=0.3)\n'
+    title_face_aware = (f'+ Face-Aware AdaIN\n'
                         f'SSIM: {face_aware_metrics[0]:.3f} | '
                         f'Percep: {face_aware_metrics[1]:.3f} | '
-                        f'Face: {face_aware_metrics[2]:.3f} ({face_diff_2:+.3f})')
+                        f'Face: {face_aware_metrics[2]:.3f}')
     axes[1, 1].set_title(title_face_aware, fontsize=12, fontweight='bold', pad=10)
     axes[1, 1].axis('off')
     
-    # Row 2, Col 3: All Combined (Best Model)
+    # Row 2, Col 3: All Combined
     axes[1, 2].imshow(all_combined_img)
-    face_diff_3 = all_combined_metrics[2] - baseline_metrics[2]
-    title_all = (f'Step 3: + Eye-Specific Loss (β=1) ⭐\n'
+    title_all = (f'+ Eye-Specific Loss\n'
                  f'SSIM: {all_combined_metrics[0]:.3f} | '
                  f'Percep: {all_combined_metrics[1]:.3f} | '
-                 f'Face: {all_combined_metrics[2]:.3f} ({face_diff_3:+.3f})')
-    axes[1, 2].set_title(title_all, fontsize=12, fontweight='bold', pad=10,
-                         bbox=dict(boxstyle='round,pad=0.5', facecolor='yellow', alpha=0.3))
+                 f'Face: {all_combined_metrics[2]:.3f}')
+    axes[1, 2].set_title(title_all, fontsize=12, fontweight='bold', pad=10)
     axes[1, 2].axis('off')
     
-    # Main title
-    fig.suptitle(f'Progressive Identity Preservation: {content_name} + {style_name}',
-                 fontsize=16, fontweight='bold', y=0.98)
-    
-    # Save figure
+    # Save figure (no main title)
     plt.savefig(output_path, dpi=200, bbox_inches='tight')
     plt.close()
     
@@ -218,18 +176,10 @@ def main():
     output_dir = result_base / "comparisons"
     output_dir.mkdir(exist_ok=True, parents=True)
     
-    # Initialize models for metrics
-    print("Initializing face detector and recognizer...")
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    face_detector = FaceDetector(device=device)
-    face_recognizer = FaceRecognizer(device=device)
-    
-    # VGG for perceptual similarity (use relu4_1 layer)
-    vgg = vgg19(pretrained=True).features[:21].to(device).eval()  # Up to relu4_1
-    for param in vgg.parameters():
-        param.requires_grad = False
-    
-    print(f"✅ Models loaded on {device}")
+    # No need to initialize models - metrics are pre-computed!
+    print("✅ Using pre-computed metrics from inference (fast!)")
+    print("   Metrics were computed on tensors before saving")
+    print("   This ensures consistency with training metrics")
     print()
     
     # Get all content and style combinations
@@ -256,8 +206,7 @@ def main():
                 content_dir, style_dir,
                 baseline_dir, identity_dir,
                 face_aware_dir, all_combined_dir,
-                output_path,
-                face_detector, face_recognizer, vgg
+                output_path
             )
             
             if success:

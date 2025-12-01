@@ -42,7 +42,7 @@ Neural style transfer distorts facial features in portraits, making individuals 
 - Ethical concerns: No real children's photos
 
 **Our Solution:**
-Three complementary methods achieving **+22.4% face similarity improvement** while maintaining real-time speed.
+Three complementary methods achieving **+28.7% face similarity improvement** while maintaining real-time speed.
 
 ---
 
@@ -98,7 +98,7 @@ Style → VGG19      Face    4 Losses:
 
 #### Method 1: Identity Loss (Global Constraint)
 **What:** MSE between FaceNet embeddings (512-dim)
-**Result:** +2.2% face similarity
+**Result:** +24.5% face similarity
 **Key Finding:** Requires optimal γ=1000 (3-15% of total loss)
 
 #### Method 2: Face-Aware AdaIN (Spatial Control) ⭐
@@ -107,13 +107,13 @@ Style → VGG19      Face    4 Losses:
 - Background: 100% stylization
 - Smooth transitions via Gaussian blur
 
-**Result:** +8.9% face similarity (PRIMARY METHOD)
-**Key Insight:** Spatial control > global optimization
+**Result:** +26.7% face similarity (COMBINED WITH IDENTITY)
+**Key Insight:** Spatial control + global constraint = synergy
 
 #### Method 3: Eye-Specific Loss (Targeted Refinement)
 **What:** VGG perceptual loss on 48×48 eye patches
-**Result:** +1.0% additional improvement
-**Combined:** **+22.4% total improvement**
+**Result:** +2.2% additional improvement
+**Combined:** **+28.7% total improvement**
 
 ---
 
@@ -123,11 +123,12 @@ Style → VGG19      Face    4 Losses:
 
 | Model | Face Similarity | Improvement |
 |-------|----------------|-------------|
-| Baseline (AdaIN) | 54.2% | — |
-| + Identity (γ=1000) | 73.3% | +19.1% |
-| + Face-Aware (α=0.3) | 75.6% | +21.4% |
-| **All Three** | **76.6%** | **+22.4%** 🏆 |
+| Baseline (AdaIN) | 54.0% | — |
+| + Identity (γ=1000) | 78.5% | +24.5% |
+| + Face-Aware (α=0.3) | 80.7% | +26.7% |
+| **All Three** | **82.7%** | **+28.7%** 🏆 |
 
+**Test Set:** 840 pairs (40 faces × 21 styles)
 **Inference Speed:** Maintained at 0.03-0.13s (real-time)
 
 ---
@@ -138,8 +139,8 @@ Style → VGG19      Face    4 Losses:
 
 **Figure 1: Progressive Improvement (Starry Night)**
 ```
-Row 1: Content | Style | Baseline (54.2%)
-Row 2: Identity (73.3%) | Face-Aware (75.6%) | All Three (76.6%)
+Row 1: Content | Style | Baseline (54.0%)
+Row 2: Identity (78.5%) | Face-Aware (80.7%) | All Three (82.7%)
 ```
 
 **Figure 2: Children's Book Style (Peter Rabbit)**
@@ -178,7 +179,7 @@ Row 2: Identity | Face-Aware | All Three
 
 2. **Signal Region (γ=100-1000):** ✅ Optimal
    - 3-15% of total loss
-   - γ=1000 achieves best face similarity (76.2%)
+   - γ=1000 achieves best face similarity (78.5% standalone, 82.7% combined)
 
 3. **Domination Region (γ>1000):** ❌ Collapses
    - > 50% of total loss
@@ -210,9 +211,10 @@ Row 2: Identity | Face-Aware | All Three
 
 ### 9. KEY CONTRIBUTIONS & INSIGHTS 💡
 
-**1. Spatial Control > Global Optimization**
-- Face-Aware (+8.9%) dramatically outperforms Identity Loss (+2.2%)
-- Direct feature blending beats indirect gradient optimization
+**1. Spatial Control + Global Constraint = Synergy**
+- Combined methods (+28.7%) outperform individual components
+- Face-Aware (+26.7%) + Identity (+24.5%) + Eye (+2.2%) work together
+- Direct feature blending + indirect gradient optimization = complementary
 
 **2. U-Curve Phenomenon (Novel)**
 - Non-monotonic relationship for identity weight

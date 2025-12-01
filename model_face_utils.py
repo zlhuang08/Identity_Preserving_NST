@@ -156,9 +156,10 @@ class FaceDetector:
             keep_all=keep_all,
             device=device,
             min_face_size=min_face_size,
-            thresholds=[0.6, 0.7, 0.7],  # Detection thresholds for P-Net, R-Net, O-Net
-                                          # Lower = more detections but more false positives
-                                          # Higher = fewer detections but higher precision
+            thresholds=[0.3, 0.5, 0.5],  # LOWERED thresholds for stylized images
+                                          # Default [0.6, 0.7, 0.7] is too strict for artistic styles
+                                          # Lower = more detections (needed for style transfer)
+                                          # Higher = fewer detections but higher precision (for natural images)
             post_process=False  # We'll handle normalization ourselves for consistency
         )
     

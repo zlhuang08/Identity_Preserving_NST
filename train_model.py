@@ -465,24 +465,29 @@ def train_epoch(model, dataloader, optimizer, device, content_weight=1.0, style_
         style_loss = calc_style_loss(gen_features, style_features)
         
         # ========================================
-        # Calculate identity loss (if enabled)
+        # Calculate identity loss (if enabled) and similarity metrics (always)
         # ========================================
+        # IMPORTANT: We ALWAYS compute face similarity for monitoring,
+        # but only use it as a loss term when identity_weight > 0
         identity_loss = torch.tensor(0.0, device=device)  # Default: no identity loss
         num_faces = 0
         avg_similarity = 0.0
         
-        if identity_weight > 0 and identity_preserver is not None:
-            # Detect faces in both stylized and content images
-            # Extract face embeddings and compute MSE loss
-            # This encourages stylized faces to preserve identity
-            identity_loss, metrics = identity_preserver.compute_identity_loss(stylized, content)
+        if identity_preserver is not None:
+            # Always compute similarity (even for baseline model)
+            # This allows us to compare all models on the same metric
+            id_loss, metrics = identity_preserver.compute_identity_loss(stylized, content)
             num_faces = metrics['num_matched_faces']      # How many face pairs detected
             avg_similarity = metrics['avg_similarity']    # Cosine similarity (0-1)
             
-            # Track statistics for epoch-level metrics
+            # Track statistics for epoch-level metrics (always track for all models)
             total_identity_samples += num_faces
             if num_faces > 0:
                 total_similarity += avg_similarity * num_faces
+            
+            # Only use as loss term if identity_weight > 0
+            if identity_weight > 0:
+                identity_loss = id_loss  # Use the computed loss for backprop
         
         # ========================================
         # Eye-Specific Loss (YOUR NOVEL CONTRIBUTION!)
@@ -555,7 +560,12 @@ def train_epoch(model, dataloader, optimizer, device, content_weight=1.0, style_
     # Only meaningful if identity preservation is enabled and faces were detected
     avg_similarity_epoch = total_similarity / total_identity_samples if total_identity_samples > 0 else 0.0
     
-    return avg_loss, avg_content_loss, avg_style_loss, avg_identity_loss, avg_eye_loss, avg_similarity_epoch
+    # Calculate face detection rate (percentage of images where faces were detected)
+    # This is important to track - if detection rate drops, similarity becomes less reliable
+    total_images = len(dataloader) * dataloader.batch_size
+    detect_rate = total_identity_samples / total_images if total_images > 0 else 0.0
+    
+    return avg_loss, avg_content_loss, avg_style_loss, avg_identity_loss, avg_eye_loss, avg_similarity_epoch, detect_rate
 
 
 def validate(model, dataloader, device, content_weight=1.0, style_weight=10.0,
@@ -625,18 +635,24 @@ def validate(model, dataloader, device, content_weight=1.0, style_weight=10.0,
             style_loss = calc_style_loss(gen_features, style_features)
             
             # Calculate identity loss if enabled (same as training)
+            # IMPORTANT: Always compute similarity for monitoring
             identity_loss = torch.tensor(0.0, device=device)
             num_faces = 0
             avg_similarity = 0.0
             
-            if identity_weight > 0 and identity_preserver is not None:
-                identity_loss, metrics = identity_preserver.compute_identity_loss(stylized, content)
+            if identity_preserver is not None:
+                # Always compute similarity (even for baseline model)
+                id_loss, metrics = identity_preserver.compute_identity_loss(stylized, content)
                 num_faces = metrics['num_matched_faces']
                 avg_similarity = metrics['avg_similarity']
                 
                 total_identity_samples += num_faces
                 if num_faces > 0:
                     total_similarity += avg_similarity * num_faces
+                
+                # Only use as loss term if identity_weight > 0
+                if identity_weight > 0:
+                    identity_loss = id_loss
             
             # Calculate eye loss if enabled
             eye_loss = torch.tensor(0.0, device=device)
@@ -665,7 +681,11 @@ def validate(model, dataloader, device, content_weight=1.0, style_weight=10.0,
     avg_eye_loss = total_eye_loss / len(dataloader)
     avg_similarity_epoch = total_similarity / total_identity_samples if total_identity_samples > 0 else 0.0
     
-    return avg_loss, avg_content_loss, avg_style_loss, avg_identity_loss, avg_eye_loss, avg_similarity_epoch
+    # Calculate face detection rate
+    total_images = len(dataloader) * dataloader.batch_size
+    detect_rate = total_identity_samples / total_images if total_images > 0 else 0.0
+    
+    return avg_loss, avg_content_loss, avg_style_loss, avg_identity_loss, avg_eye_loss, avg_similarity_epoch, detect_rate
 
 
 def worker_init_fn(worker_id):
@@ -931,6 +951,26 @@ def main():
     )
     print(f"Validation pairs: {len(val_dataset)}")
     
+    # ========================================
+    # Create test dataset and loader
+    # ========================================
+    print("\nLoading test dataset...")
+    test_dataset = ImageDataset(
+        content_dir=args.content_dir,  # Same directory, different split
+        style_dir=args.style_dir,
+        split_file='data/content_splits/test.txt',  # Use test split
+        image_size=args.image_size
+    )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,             # Don't shuffle test (deterministic for curves)
+        num_workers=args.num_workers,
+        pin_memory=True,
+        worker_init_fn=worker_init_fn  # Seed workers for reproducibility
+    )
+    print(f"Test pairs: {len(test_dataset)}")
+    
     # ============================================================================
     # MODEL CREATION
     # ============================================================================
@@ -962,21 +1002,28 @@ def main():
     print(f"✓ Adam optimizer created (lr={args.learning_rate})")
     
     # ============================================================================
-    # IDENTITY PRESERVER (optional)
+    # IDENTITY PRESERVER (always initialize for similarity monitoring)
     # ============================================================================
-    identity_preserver = None
+    # Always initialize identity preserver so we can track face similarity
+    # for ALL models (including baseline). This allows fair comparison.
+    print(f"\nInitializing identity preserver...")
     if args.identity_weight > 0:
-        print(f"\nInitializing identity preserver (weight={args.identity_weight})...")
-        try:
-            identity_preserver = IdentityPreserver(device=device)
-            print("✓ Identity preserver initialized successfully")
-            print("   Face detector: MTCNN")
-            print("   Face recognizer: InceptionResnetV1 (VGGFace2)")
-        except ImportError as e:
-            print(f"⚠️  Warning: Could not initialize identity preserver: {e}")
-            print("   Install facenet-pytorch: pip install facenet-pytorch")
-            print("   Continuing without identity loss...")
-            args.identity_weight = 0
+        print(f"  Mode: WITH identity loss (weight={args.identity_weight})")
+    else:
+        print(f"  Mode: Monitoring only (no identity loss in training)")
+    
+    identity_preserver = None
+    try:
+        identity_preserver = IdentityPreserver(device=device)
+        print("✓ Identity preserver initialized successfully")
+        print("   Face detector: MTCNN")
+        print("   Face recognizer: InceptionResnetV1 (VGGFace2)")
+        print("   Usage: Face similarity tracked for all models")
+    except ImportError as e:
+        print(f"⚠️  Warning: Could not initialize identity preserver: {e}")
+        print("   Install facenet-pytorch: pip install facenet-pytorch")
+        print("   Continuing without identity tracking...")
+        identity_preserver = None
     
     # ============================================================================
     # EYE-SPECIFIC LOSS (Novel Contribution!)
@@ -1061,13 +1108,17 @@ def main():
     # ========================================
     # Setup CSV logging for training curves
     # ========================================
+    # Use same header format for ALL models for easy comparison
+    # Columns that don't apply to a model will be filled with 0.0
+    # Format: epoch, train_metrics, val_metrics, test_metrics, similarities
     csv_path = os.path.join(args.checkpoint_dir, 'training_curves.csv')
     csv_file = open(csv_path, 'w')
-    csv_header = 'epoch,train_loss,train_content,train_style,val_loss,val_content,val_style'
-    if args.identity_weight > 0:
-        csv_header += ',train_identity,train_similarity,val_identity,val_similarity'
-    if args.eye_weight > 0:
-        csv_header += ',train_eye,val_eye'
+    csv_header = 'epoch,'
+    csv_header += 'train_loss,train_content,train_style,train_identity,train_eye,'
+    csv_header += 'val_loss,val_content,val_style,val_identity,val_eye,'
+    csv_header += 'test_loss,test_content,test_style,test_identity,test_eye,'
+    csv_header += 'train_similarity,val_similarity,test_similarity,'
+    csv_header += 'train_detect_rate,val_detect_rate,test_detect_rate'
     csv_file.write(csv_header + '\n')
     csv_file.flush()  # Ensure header is written immediately
     print(f"✓ Training curves will be saved to: {csv_path}\n")
@@ -1082,7 +1133,7 @@ def main():
         # ========================================
         # Training phase
         # ========================================
-        train_loss, train_content_loss, train_style_loss, train_identity_loss, train_eye_loss, train_similarity = train_epoch(
+        train_loss, train_content_loss, train_style_loss, train_identity_loss, train_eye_loss, train_similarity, train_detect_rate = train_epoch(
             model=model,
             dataloader=train_loader,
             optimizer=optimizer,
@@ -1111,7 +1162,7 @@ def main():
         # ========================================
         # Validation phase (always run for proper training curves)
         # ========================================
-        val_loss, val_content_loss, val_style_loss, val_identity_loss, val_eye_loss, val_similarity = validate(
+        val_loss, val_content_loss, val_style_loss, val_identity_loss, val_eye_loss, val_similarity, val_detect_rate = validate(
             model=model,
             dataloader=val_loader,
             device=device,
@@ -1137,30 +1188,78 @@ def main():
         print(val_stats)
         
         # ========================================
+        # Test phase (evaluate on held-out test set)
+        # ========================================
+        test_loss, test_content_loss, test_style_loss, test_identity_loss, test_eye_loss, test_similarity, test_detect_rate = validate(
+            model=model,
+            dataloader=test_loader,
+            device=device,
+            content_weight=args.content_weight,
+            style_weight=args.style_weight,
+            identity_weight=args.identity_weight,
+            identity_preserver=identity_preserver,
+            eye_weight=args.eye_weight,
+            eye_loss_module=eye_loss_module,
+            face_aware_adain=args.use_face_aware_adain,
+            face_detector=face_detector,
+            face_preservation_alpha=args.face_preservation_alpha,
+            face_mask_margin=args.face_mask_margin
+        )
+        
+        # Print test statistics
+        test_stats = f"Test Loss: {test_loss:.4f} (Content: {test_content_loss:.4f}, Style: {test_style_loss:.4f}"
+        if args.identity_weight > 0:
+            test_stats += f", Identity: {test_identity_loss:.4f}, Similarity: {test_similarity:.4f}"
+        if args.eye_weight > 0:
+            test_stats += f", Eye: {test_eye_loss:.4f}"
+        test_stats += ")"
+        print(test_stats)
+        
+        # ========================================
         # Log to CSV for training curves
         # ========================================
-        csv_line = f"{epoch+1},{train_loss:.6f},{train_content_loss:.6f},{train_style_loss:.6f},"
-        csv_line += f"{val_loss:.6f},{val_content_loss:.6f},{val_style_loss:.6f}"
-        if args.identity_weight > 0:
-            csv_line += f",{train_identity_loss:.6f},{train_similarity:.6f},"
-            csv_line += f"{val_identity_loss:.6f},{val_similarity:.6f}"
-        if args.eye_weight > 0:
-            csv_line += f",{train_eye_loss:.6f},{val_eye_loss:.6f}"
+        # Format: epoch, train_metrics, val_metrics, test_metrics, similarities
+        # Always write all columns (use 0.0 for unused metrics)
+        
+        csv_line = f"{epoch+1},"
+        
+        # Train metrics
+        csv_line += f"{train_loss:.6f},{train_content_loss:.6f},{train_style_loss:.6f},"
+        csv_line += f"{train_identity_loss:.6f}," if args.identity_weight > 0 else "0.0,"
+        csv_line += f"{train_eye_loss:.6f}," if args.eye_weight > 0 else "0.0,"
+        
+        # Val metrics
+        csv_line += f"{val_loss:.6f},{val_content_loss:.6f},{val_style_loss:.6f},"
+        csv_line += f"{val_identity_loss:.6f}," if args.identity_weight > 0 else "0.0,"
+        csv_line += f"{val_eye_loss:.6f}," if args.eye_weight > 0 else "0.0,"
+        
+        # Test metrics
+        csv_line += f"{test_loss:.6f},{test_content_loss:.6f},{test_style_loss:.6f},"
+        csv_line += f"{test_identity_loss:.6f}," if args.identity_weight > 0 else "0.0,"
+        csv_line += f"{test_eye_loss:.6f}," if args.eye_weight > 0 else "0.0,"
+        
+        # Similarities (always write, computed for all models)
+        csv_line += f"{train_similarity:.6f},{val_similarity:.6f},{test_similarity:.6f},"
+        
+        # Detection rates (always write, computed for all models)
+        csv_line += f"{train_detect_rate:.6f},{val_detect_rate:.6f},{test_detect_rate:.6f}"
+        
         csv_file.write(csv_line + '\n')
         csv_file.flush()  # Ensure data is written immediately
         
         # ========================================
-        # Save periodic checkpoint
+        # Update best model if validation improved
         # ========================================
-        if (epoch + 1) % args.save_interval == 0:
-            checkpoint_path = os.path.join(args.checkpoint_dir, f'checkpoint_epoch_{epoch+1}.pth')
-            save_checkpoint(model, optimizer, epoch, train_loss, checkpoint_path)
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            print(f"  → New best validation loss: {best_val_loss:.4f}")
     
     # ========================================
-    # Save final model
+    # Save final model only
     # ========================================
     final_checkpoint_path = os.path.join(args.checkpoint_dir, 'final_model.pth')
     save_checkpoint(model, optimizer, args.epochs - 1, train_loss, final_checkpoint_path)
+    print(f"\n✓ Final model saved to: {final_checkpoint_path}")
     
     # ========================================
     # Close CSV file
@@ -1174,14 +1273,19 @@ def main():
     print("\n" + "="*50)
     print("🎉 Training completed!")
     print("="*50)
-    print(f"\nCheckpoints saved to: {args.checkpoint_dir}/")
-    print(f"  - best_model.pth (lowest validation loss)")
-    print(f"  - final_model.pth (last epoch)")
-    print(f"  - checkpoint_epoch_*.pth (periodic saves)")
+    print(f"\nFinal model saved to: {args.checkpoint_dir}/final_model.pth")
+    print(f"Training curves saved to: {csv_path}")
+    print("\nCSV contains train/val/test metrics for all epochs:")
+    print("  - Losses: train_loss, val_loss, test_loss")
+    print("  - Content: train_content, val_content, test_content")
+    print("  - Style: train_style, val_style, test_style")
+    print("  - Identity: train_identity, val_identity, test_identity")
+    print("  - Similarity: train_similarity, val_similarity, test_similarity")
+    print("  - Eye: train_eye, val_eye, test_eye")
     print("\nNext steps:")
-    print("  1. Run inference: python eval_inference.py --checkpoint <path>")
-    print("  2. Evaluate metrics: python eval_metrics.py --checkpoint <path>")
-    print("  3. Visualize results: python result_visualize.py")
+    print("  1. Analyze training curves to check for overfitting")
+    print("  2. Compare val vs test similarity at each epoch")
+    print("  3. Run final evaluation on test set")
     print()
 
 
