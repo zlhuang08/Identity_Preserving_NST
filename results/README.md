@@ -26,10 +26,10 @@ results/
 │   └── comparisons/                         # Progressive comparison grids (42 grids)
 │
 └── hyperparameter_tuning/                   # Hyperparameter analysis (39 MB)
-    ├── beta_tuning_dual_axis.png            # Eye weight (β) analysis plot
-    ├── learning_rate_comparison_combined.png # Learning rate analysis plot
-    ├── milestone_ucurve_analysis.png        # Identity weight (γ) U-curve plot
-    ├── weight_pareto_only.png               # Content:Style Pareto curve
+    ├── eye_weight_tuning.png                # Eye weight (β) analysis plot
+    ├── learning_rate_tuning.png             # Learning rate analysis plot
+    ├── identity_weight_tuning.png           # Identity weight (γ) Pareto trade-off plot
+    ├── style_weight_tuning.png              # Content:Style Pareto curve
     ├── identity_comparisons/                # Identity weight comparison grids (10 grids)
     ├── identity_weight/                     # Identity weight generated images (8 folders)
     └── style_comparisons/                   # Style weight comparison grids (10 grids)
@@ -108,28 +108,28 @@ Contains analysis of all hyperparameter tuning experiments.
 
 ### **1. Key Analysis Plots (4 files, ~2 MB)**
 
-#### **beta_tuning_dual_axis.png** (400 KB)
+#### **eye_weight_tuning.png** (400 KB)
 - **What:** Eye weight (β) tuning analysis
 - **Shows:** Face Similarity & Eye Loss vs β (dual y-axes)
 - **Tested values:** β = [0.1, 1, 10, 100]
 - **Optimal:** **β=1** (83.17% face similarity)
 - **Key finding:** β=1 achieves Goldilocks zone - strong identity + good eye preservation
 
-#### **learning_rate_comparison_combined.png** (436 KB)
+#### **learning_rate_tuning.png** (436 KB)
 - **What:** Learning rate tuning analysis
 - **Shows:** Train/Val loss curves for different learning rates
 - **Tested values:** lr = [1e-5, 3e-5, 1e-4, 3e-4, 1e-3]
 - **Optimal:** **lr=1e-4** (balanced convergence)
 - **Key finding:** lr=1e-4 provides stable training without oscillations
 
-#### **milestone_ucurve_analysis.png** (352 KB)
-- **What:** Identity weight (γ) U-curve analysis
-- **Shows:** Face Similarity & Identity Loss Contribution vs γ
+#### **identity_weight_tuning.png** (437 KB)
+- **What:** Identity weight (γ) Pareto trade-off analysis
+- **Shows:** Face Similarity & Style Loss vs γ
 - **Tested values:** γ = [0, 0.1, 1, 10, 100, 1000, 10000, 100000]
-- **Optimal:** **γ=1000** (83.2% face similarity)
-- **Key finding:** U-curve phenomenon - γ must be large enough (100-1000) to be effective
+- **Optimal:** **γ=1000** (76.8% face similarity, 1.315 style loss)
+- **Key finding:** Face similarity increases monotonically; γ=1000 is Pareto optimal (balances identity preservation and style quality)
 
-#### **weight_pareto_only.png** (304 KB)
+#### **style_weight_tuning.png** (304 KB)
 - **What:** Content:Style weight Pareto trade-off
 - **Shows:** Perceptual Similarity vs Face Similarity for different ratios
 - **Tested ratios:** [1:1, 1:5, 1:10, 1:20, 1:50]
@@ -246,7 +246,7 @@ python results/plot_eye_weight_tuning.py
 
 **Input:** `checkpoints/hyperparameter_tuning/eye_weight/beta_*/training_curves.csv` (4 files)
 
-**Output:** `results/hyperparameter_tuning/beta_tuning_dual_axis.png`
+**Output:** `results/hyperparameter_tuning/eye_weight_tuning.png`
 
 **Shows:** Face Similarity (left y-axis) and Eye Loss (right y-axis) vs β
 
@@ -263,9 +263,9 @@ python results/plot_identity_weight_tuning.py
 
 **Input:** `checkpoints/hyperparameter_tuning/identity_weight/gamma_*/training_curves.csv` (8 files)
 
-**Output:** `results/hyperparameter_tuning/milestone_ucurve_analysis.png`
+**Output:** `results/hyperparameter_tuning/identity_weight_tuning.png`
 
-**Shows:** Face Similarity vs γ (demonstrates U-curve phenomenon)
+**Shows:** Face Similarity & Style Loss vs γ (demonstrates Pareto trade-off)
 
 **Runtime:** <10 seconds
 
@@ -277,12 +277,12 @@ Plot learning rate tuning analysis.
 ```bash
 python results/plot_learning_curves.py \
     --checkpoint-dir checkpoints \
-    --output results/hyperparameter_tuning/learning_rate_comparison_combined.png
+    --output results/hyperparameter_tuning/learning_rate_tuning.png
 ```
 
 **Input:** `checkpoints/hyperparameter_tuning/learning_rate/lr_*/training_curves.csv` (5 files)
 
-**Output:** `results/hyperparameter_tuning/learning_rate_comparison_combined.png`
+**Output:** `results/hyperparameter_tuning/learning_rate_tuning.png`
 
 **Shows:** Train/Val loss curves for different learning rates
 
@@ -296,12 +296,12 @@ Plot content:style weight Pareto trade-off curve.
 ```bash
 python results/plot_style_weight_tuning.py \
     --checkpoint-dir checkpoints \
-    --output results/hyperparameter_tuning/weight_pareto_only.png
+    --output results/hyperparameter_tuning/style_weight_tuning.png
 ```
 
 **Input:** `checkpoints/hyperparameter_tuning/content_style_weight/weights_*/training_curves.csv` (5 files)
 
-**Output:** `results/hyperparameter_tuning/weight_pareto_only.png`
+**Output:** `results/hyperparameter_tuning/style_weight_tuning.png`
 
 **Shows:** Perceptual Similarity vs Face Similarity (Pareto frontier)
 
@@ -347,7 +347,7 @@ open results/model_progression/comparisons/progression_face_00010_potter_peter_r
 open results/hyperparameter_tuning/identity_comparisons/identity_comparison_face_00066_starry_night.png
 
 # Eye weight tuning analysis
-open results/hyperparameter_tuning/beta_tuning_dual_axis.png
+open results/hyperparameter_tuning/eye_weight_tuning.png
 ```
 
 ---
@@ -441,10 +441,10 @@ open results/hyperparameter_tuning/beta_tuning_dual_axis.png
 5. `model_progression/comparisons/progression_face_00066_water_lilies.png`
 
 **Hyperparameter Analysis (4 plots):**
-1. `hyperparameter_tuning/learning_rate_comparison_combined.png` - Learning rate analysis
-2. `hyperparameter_tuning/weight_pareto_only.png` - Content:Style trade-off
-3. `hyperparameter_tuning/milestone_ucurve_analysis.png` - Identity weight U-curve
-4. `hyperparameter_tuning/beta_tuning_dual_axis.png` - Eye weight analysis
+1. `hyperparameter_tuning/learning_rate_tuning.png` - Learning rate analysis
+2. `hyperparameter_tuning/style_weight_tuning.png` - Content:Style trade-off
+3. `hyperparameter_tuning/identity_weight_tuning.png` - Identity weight Pareto trade-off
+4. `hyperparameter_tuning/eye_weight_tuning.png` - Eye weight analysis
 
 ---
 

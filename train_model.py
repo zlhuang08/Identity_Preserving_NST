@@ -805,8 +805,8 @@ def main():
     # ========================================
     parser.add_argument('--epochs', type=int, default=20,
                         help='Number of training epochs (20 is typical)')
-    parser.add_argument('--batch-size', type=int, default=32,
-                        help='Batch size (32 safe for dual A6000, up to 64 if GPUs are clean, 8 for smaller GPUs)')
+    parser.add_argument('--batch-size', type=int, default=64,
+                        help='Batch size (64 safe for single A6000)')
     parser.add_argument('--learning-rate', type=float, default=1e-4,
                         help='Learning rate for Adam optimizer')
     parser.add_argument('--content-weight', type=float, default=1.0,

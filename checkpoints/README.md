@@ -6,7 +6,7 @@ This directory contains all trained models and hyperparameter tuning results.
 
 ## Main Models (Final Trained Models)
 
-These are the 4 production models trained on the full dataset (120 train, 40 val, 40 test) for 20 epochs:
+These are the 5 production models trained on the full dataset (120 train, 40 val, 40 test) for 20 epochs:
 
 ### `0_baseline/`
 - **Description:** Standard AdaIN without identity preservation
@@ -19,7 +19,15 @@ These are the 4 production models trained on the full dataset (120 train, 40 val
 ### `1_identity/`
 - **Description:** AdaIN with identity loss
 - **Hyperparameters:** γ=1000 (optimal identity weight)
-- **Performance:** 78.5% face similarity (+24.5% vs baseline)
+- **Performance:** 78.7% test face similarity (+21.7% vs baseline)
+- **Files:**
+  - `final_model.pth` - Final trained model weights
+  - `training_curves.csv` - Complete training/val/test metrics per epoch
+
+### `2_identity_plus_eye/`
+- **Description:** AdaIN with identity loss + eye-specific loss
+- **Hyperparameters:** γ=1000 (identity weight), β=1 (eye weight)
+- **Performance:** 82.4% test face similarity (+25.4% vs baseline)
 - **Files:**
   - `final_model.pth` - Final trained model weights
   - `training_curves.csv` - Complete training/val/test metrics per epoch
@@ -27,15 +35,15 @@ These are the 4 production models trained on the full dataset (120 train, 40 val
 ### `2_face_aware_plus_identity/`
 - **Description:** Face-aware AdaIN with identity loss
 - **Hyperparameters:** α=0.3 (face preservation), γ=1000 (identity weight)
-- **Performance:** 80.7% face similarity (+26.7% vs baseline)
+- **Performance:** 81.0% test face similarity (+24.0% vs baseline)
 - **Files:**
   - `final_model.pth` - Final trained model weights
   - `training_curves.csv` - Complete training/val/test metrics per epoch
 
 ### `3_all_combined/`
 - **Description:** Face-aware AdaIN + identity loss + eye-specific loss
-- **Hyperparameters:** α=0.3, γ=1000, β=100 (eye weight)
-- **Performance:** 82.7% face similarity (+28.7% vs baseline) 🏆 **BEST**
+- **Hyperparameters:** α=0.3, γ=1000, β=1 (eye weight)
+- **Performance:** 84.0% test face similarity (+27.0% vs baseline) 🏆 **BEST**
 - **Files:**
   - `final_model.pth` - Final trained model weights
   - `training_curves.csv` - Complete training/val/test metrics per epoch
@@ -77,17 +85,16 @@ This directory contains archived results from systematic hyperparameter tuning e
 - `gamma_10000_00/` - γ=10,000 (degraded, style collapse)
 - `gamma_100000_00/` - γ=100,000 (collapsed)
 
-**Result:** γ=1000 is optimal (3-15% of total loss). Exhibits "U-curve" phenomenon.
+**Result:** γ=1000 is Pareto optimal - achieves strong face similarity (76.8%, +21% vs baseline) with minimal style degradation (5% increase in style loss). Higher values improve face similarity further but cause style collapse.
 
 ### `hyperparameter_tuning/eye_weight/`
-**Experiment:** Eye-specific loss weight (β) sweep (5 values)
+**Experiment:** Eye-specific loss weight (β) sweep (4 values)
 - `beta_0_1/` - β=0.1 (too weak)
-- `beta_1/` - β=1 ⭐ **OPTIMAL** (best face sim with face-aware)
-- `beta_10/` - β=10 (slight degradation)
-- `beta_100/` - β=100 (used in final model, good balance)
-- `beta_1000/` - β=1000 (too strong)
+- `beta_1/` - β=1 ⭐ **OPTIMAL** (83.2% face sim, best balance)
+- `beta_10/` - β=10 (slight degradation, 78.3%)
+- `beta_100/` - β=100 (over-optimizes eye loss, 69.9%)
 
-**Result:** β=1 or β=100 both work well when combined with face-aware AdaIN
+**Result:** β=1 achieves highest validation face similarity (83.2%). Higher values over-optimize for eye loss at expense of overall face similarity.
 
 ---
 
@@ -99,6 +106,9 @@ checkpoints/
 │   ├── final_model.pth              # 14 MB (decoder weights)
 │   └── training_curves.csv          # 22 rows × 22 columns
 ├── 1_identity/
+│   ├── final_model.pth
+│   └── training_curves.csv
+├── 2_identity_plus_eye/
 │   ├── final_model.pth
 │   └── training_curves.csv
 ├── 2_face_aware_plus_identity/
@@ -200,9 +210,9 @@ plt.show()
 
 ## Disk Space
 
-- **Main Models:** ~56 MB (4 models × 14 MB each)
+- **Main Models:** ~70 MB (5 models × 14 MB each)
 - **Training Curves:** ~0.5 MB (all CSV files)
-- **Total:** ~57 MB (highly compressed after removing intermediate checkpoints)
+- **Total:** ~71 MB (highly compressed after removing intermediate checkpoints)
 
 ---
 

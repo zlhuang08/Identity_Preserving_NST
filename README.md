@@ -14,7 +14,7 @@ This project implements three complementary identity-preserving extensions to Ad
 
 1. **Face-Aware AdaIN (Primary Method):** Regional adaptive normalization applying different stylization strengths to face vs. background regions (+24.0% face similarity)
 2. **Identity Loss (Reinforcement):** Global constraint using face recognition embeddings with optimal weight γ=1000 (+21.7% face similarity)
-3. **Eye-Specific Loss (Refinement):** Targeted VGG perceptual loss on 48×48 eye patches with weight β=100 (+3.0% additional improvement)
+3. **Eye-Specific Loss (Refinement):** Targeted VGG perceptual loss on 48×48 eye patches with weight β=1 (+2-4% additional improvement)
 4. **Combined Result:** All three methods together achieve **84.0% face similarity** (+27.0% vs 57.0% baseline)
 
 ### Key Features
@@ -37,20 +37,45 @@ This project implements three complementary identity-preserving extensions to Ad
 |-------|----------------|-------------|------------|
 | **Baseline** (AdaIN only) | 57.0% | — | Fast style transfer |
 | **Identity Loss** (γ=1000) | 78.7% | +21.7% | Global embedding constraint |
+| **Identity + Eye Loss** (γ=1000, β=1) | 82.4% | +25.4% | Global + eye-specific constraints |
 | **Face-Aware + Identity** (α=0.3, γ=1000) | 81.0% | +24.0% | Regional control + global constraint |
-| **All Three Combined** (α=0.3, γ=1000, β=100) | **84.0%** | **+27.0%** 🏆 | Face-aware + identity + eye-specific |
+| **All Three Combined** (α=0.3, γ=1000, β=1) | **84.0%** | **+27.0%** 🏆 | Face-aware + identity + eye-specific |
 
 ### Key Findings
 
-1. **Face-Aware AdaIN is the most effective single method** (+24.0% improvement), demonstrating that spatial control outperforms global loss functions
-2. **Eye-Specific Loss provides refinement** (+3.0% additional improvement) by preserving identity-critical features
-3. **All three methods work synergistically** to achieve the best result (+27.0% total improvement)
-4. **Real-time performance maintained** (~0.03-0.13s per image) despite multiple identity preservation mechanisms
-5. **Hyperparameter tuning critical:** Identity weight exhibits "U-curve" phenomenon (γ=1000 optimal after testing 8 orders of magnitude)
+1. **Face-Aware AdaIN is the most effective single method** (+24.0% improvement), demonstrating that spatial control outperforms global loss functions alone
+2. **Identity + Eye Loss shows strong performance** (+25.4% improvement) achieving 82.4% face similarity without face-aware masking
+3. **Eye-Specific Loss provides consistent refinement** (+3.7% over identity alone, +3.0% over face-aware+identity) by preserving identity-critical eye features
+4. **All three methods work synergistically** to achieve the best result (+27.0% total improvement, 84.0% face similarity)
+5. **Real-time performance maintained** (~0.03-0.13s per image) despite multiple identity preservation mechanisms
+6. **Hyperparameter tuning critical:** Identity weight exhibits **Pareto trade-off** between face similarity and style quality (γ=1000 optimal after testing 8 orders of magnitude); eye weight shows non-monotonic behavior (β=1 optimal)
 
 ### Visual Results
 
 All comparison grids are available in `results/model_progression/comparisons/` (42 grids: 2 faces × 21 styles)
+
+### Evaluation Methodology
+
+Our evaluation follows a **two-pronged approach**:
+
+**1. Quantitative Evaluation (Full Test Set - 40 Images)**
+- **Purpose:** Statistical performance metrics with computational measures
+- **Dataset:** All 40 test images from `data/content_splits/test.txt` (20% of total data)
+- **Metrics:** Test face similarity, test loss, test style loss, test detection rate
+- **Scale:** 40 test images × 21 styles = 840 test combinations
+- **Use:** All reported metrics (e.g., "84.0% face similarity") use the full test set
+- **Note:** Computed automatically during training; hyperparameter tuning uses validation set (40 images) to avoid data leakage
+
+**2. Qualitative Evaluation (2 Representative Faces)**
+- **Purpose:** Visual inspection for human perception and interpretability
+- **Dataset:** 2 faces from test set: `face_00010` (girl) and `face_00066` (boy)
+- **Stored in:** `data/eval_content/` for convenient visualization generation
+- **Use:** Progressive comparison grids (2×3 layouts) showing baseline → identity → face-aware → all combined
+- **Scale:** 2 faces × 21 styles = 42 visual comparison images
+
+**Why Both?**
+- **Quantitative (40 images):** Robust statistical evidence of generalization performance
+- **Qualitative (2 images):** Human-interpretable examples demonstrating practical visual quality
 
 ---
 
@@ -75,7 +100,7 @@ cs230_final_project/
 │   ├── 0_baseline/                     # γ=0 (baseline AdaIN, no identity loss)
 │   ├── 1_identity/                     # γ=1000 (optimal identity loss)
 │   ├── 2_face_aware_plus_identity/     # α=0.3 + γ=1000
-│   ├── 3_all_combined/                 # α=0.3 + γ=1000 + β=100 (best model)
+│   ├── 3_all_combined/                 # α=0.3 + γ=1000 + β=1 (best model)
 │   ├── hyperparameter_tuning/          # Archived tuning experiments (CSVs only)
 │   │   ├── learning_rate/              # Learning rate sweep
 │   │   ├── content_style_weight/       # Content/style weight experiments
@@ -100,7 +125,7 @@ cs230_final_project/
 │   ├── hyperparameter_tuning/          # Tuning visualizations
 │   │   ├── learning_rate_comparison.png    # Learning rate curves
 │   │   ├── weight_comparison.png           # Content:Style Pareto curve
-│   │   ├── identity_weight_tuning.png      # Identity weight U-curve
+│   │   ├── identity_weight_tuning.png      # Identity weight Pareto analysis
 │   │   ├── eye_weight_tuning.png           # Eye-specific weight curves
 │   │   ├── identity_weight/                # Identity visual grids (8 γ values)
 │   │   ├── style_comparisons/              # Content/style visual grids (5 ratios)
@@ -111,7 +136,7 @@ cs230_final_project/
     ├── create_model_progression_comparison.py  # Main comparison grid generator
     ├── create_identity_comparison.py           # Identity weight comparisons
     ├── plot_learning_curves.py                 # Learning rate plots
-    ├── plot_identity_weight_tuning.py          # Identity weight U-curve
+    ├── plot_identity_weight_tuning.py          # Identity weight Pareto analysis
     ├── plot_eye_weight_tuning.py               # Eye weight curves
     └── plot_style_weight_tuning.py             # Style weight Pareto curve
 ```
@@ -173,7 +198,7 @@ python train_model.py \
 ### 4. Generate Stylized Images
 
 ```bash
-# Best model (all three methods combined: α=0.3 + γ=1000 + β=100)
+# Best model (all three methods combined: α=0.3 + γ=1000 + β=1)
 python eval_inference.py \
     --content data/eval_content/face_00010.jpg \
     --style data/style/potter_peter_rabbit.jpg \
@@ -216,7 +241,7 @@ For comprehensive 2×3 comparison showing all four models:
 ```bash
 # Generate 2×3 comparison grids  
 # Shows: Content | Style | Baseline (γ=0)
-#        Identity (γ=1000) | Face-Aware+Identity (α=0.3) | All Combined (β=100)
+#        Identity (γ=1000) | Face-Aware+Identity (α=0.3) | All Combined (β=1)
 python results/create_model_progression_comparison.py
 
 # Output: results/model_progression/comparisons/
@@ -265,8 +290,8 @@ python results/create_model_progression_comparison.py
    - Learning rate: 1e-4 (from 5-point sweep)
    - Content:Style ratio: 1:10 (from Pareto analysis)
    - Identity weight: γ=1000 (from 8-order-magnitude ablation)
-   - Eye weight: β=100 (from 5-point validation)
-4. **"U-Curve" Phenomenon:** Identity loss exhibits non-monotonic behavior—intermediate values (γ=0.1-10) actually hurt performance
+   - Eye weight: β=1 (optimal from β tuning: tested 0.1, 1, 10, 100)
+4. **Pareto Trade-off:** γ=1000 optimal due to best balance between face similarity (+21% vs baseline) and style quality (only 5% style loss increase). Higher γ improves face similarity but causes style collapse.
 5. **Loss Balance Critical:** Identity loss must be 3-15% of total loss to be effective; below 1% = noise, above 50% = dominates destructively
 
 ---
@@ -866,6 +891,66 @@ python results/create_model_progression_comparison.py
 - Skip batch size optimization (wastes training time)
 - Rely only on metrics (visual quality matters!)
 - Train for too few epochs (<10, results will be poor)
+
+---
+
+### Experiment 6: Identity + Eye Loss (Progressive Model Build-Up)
+
+**NEW:** Train a model with Identity Loss + Eye-Specific Loss (NO face-aware AdaIN) to create a clearer progressive story.
+
+**Motivation:**  
+Current comparison progression jumps from "Identity Loss" → "Face-Aware+Identity" → "Face-Aware+Identity+Eye", making face-aware the sudden change. Better progression: Identity → Identity+Eye → Face-Aware+Identity+Eye
+
+```bash
+# Model: Identity Loss + Eye-Specific Loss
+# Checkpoint: checkpoints/2_identity_plus_eye/
+
+python train_model.py \
+    --content-dir data/content \
+    --style-dir data/style \
+    --checkpoint-dir checkpoints/2_identity_plus_eye \
+    --identity-weight 1000.0 \
+    --eye-weight 1.0 \
+    --learning-rate 0.0001 \
+    --batch-size 64 \
+    --epochs 20 \
+    --content-weight 1.0 \
+    --style-weight 10.0 \
+    --seed 42 \
+    --save-interval 5
+```
+
+**Hyperparameters:**
+- Identity weight: γ = 1000.0 (optimal from γ tuning)
+- Eye weight: β = 1.0 (optimal from β tuning)
+- NO face-aware AdaIN (use_face_aware_adain = False)
+- Learning rate: 1e-4 (optimal)
+- Content:Style: 1:10 (optimal)
+- Batch size: 64
+- Epochs: 20
+
+**Expected Results:**
+- Face Sim: ~79-82% (moderate improvement over identity alone)
+- Aesthetic Unity: ⭐⭐⭐⭐ (maintains unity like identity only)
+- Training Time: ~65 min (slightly longer due to eye detection)
+
+**New Progression:**
+```
+Step 0: Baseline (γ=0)           → 57.0% face sim
+Step 1: + Identity (γ=1000)      → 78.7% (+21.7%) 
+Step 2: + Eye Loss (β=1)         → ~80% (+2-3%)    ← NEW MODEL
+Step 3: + Face-Aware (α=0.3)     → 84.0% (+27.0%)  
+```
+
+This creates a clearer story:
+1. Global constraint (identity loss)
+2. Targeted refinement (eye loss) 
+3. Spatial control (face-aware, introduces aesthetic trade-off)
+
+**After training, update comparison grids:**
+- Rename Model 2 → Model 3 (face-aware+identity+eye)
+- Insert new Model 2 (identity+eye)
+- Regenerate all 2×3 comparison grids
 
 ---
 

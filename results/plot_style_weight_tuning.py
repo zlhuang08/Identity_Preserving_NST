@@ -14,7 +14,7 @@ from pathlib import Path
 import argparse
 
 
-def plot_pareto_curve_only(checkpoint_base_dir, output_file='results/hyperparameter_tuning/weight_pareto_only.png'):
+def plot_pareto_curve_only(checkpoint_base_dir, output_file='results/hyperparameter_tuning/style_weight_tuning.png'):
     """Plot only the Pareto trade-off curve"""
     
     checkpoint_base_dir = Path(checkpoint_base_dir)
@@ -88,40 +88,21 @@ def plot_pareto_curve_only(checkpoint_base_dir, output_file='results/hyperparame
     # Annotate each point with ratio (positioned directly above at 12:00 to avoid overlap)
     for i, (c, s, ratio) in enumerate(zip(content_losses, style_losses, ratios)):
         ax.annotate(ratio, (c, s), fontsize=11, ha='center', fontweight='bold',
-                   xytext=(0, 18), textcoords='offset points',
-                   bbox=dict(boxstyle='round,pad=0.4', facecolor='yellow', alpha=0.8,
-                            edgecolor='black', linewidth=1.5))
+                   xytext=(0, 18), textcoords='offset points')
     
     # Highlight the 1:10 ratio (standard/optimal)
     optimal_idx = [i for i, r in enumerate(results) if r['ratio'] == '1:10']
     if optimal_idx:
         idx = optimal_idx[0]
         ax.scatter([content_losses[idx]], [style_losses[idx]], s=600, 
-                  marker='*', color='#D81159', edgecolors='black', linewidths=3,
-                  label='Optimal 1:10 Ratio ⭐', zorder=10)
-        ax.legend(fontsize=12, loc='upper right', framealpha=0.95)
+                  marker='*', color='#FFBC42', edgecolors='black', linewidths=3,
+                  zorder=10)
     
     # Labels and title
     ax.set_xlabel('Content Loss (Validation)', fontsize=14, fontweight='bold')
     ax.set_ylabel('Style Loss (Validation)', fontsize=14, fontweight='bold')
-    ax.set_title('Pareto Trade-off Curve: Content vs Style Loss', 
-                fontsize=16, fontweight='bold', pad=20)
     ax.grid(True, alpha=0.3, linestyle='--', linewidth=1)
     
-    # Add explanation text box
-    explanation_text = (
-        "Trade-off Analysis:\n"
-        "• Low Content Loss = Good structure preservation\n"
-        "• Low Style Loss = Strong artistic stylization\n"
-        "• 1:10 ratio provides optimal balance\n"
-        "  (Good content + Strong style)"
-    )
-    
-    ax.text(0.98, 0.5, explanation_text, 
-           transform=ax.transAxes, fontsize=10,
-           verticalalignment='center', horizontalalignment='right',
-           bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.9,
-                    edgecolor='black', linewidth=1.5))
     
     # Add colorbar
     cbar = plt.colorbar(scatter, ax=ax, pad=0.02)
@@ -159,7 +140,7 @@ if __name__ == "__main__":
     
     parser.add_argument('--checkpoint-dir', type=str, default='checkpoints',
                        help='Base directory containing weights_* subdirectories')
-    parser.add_argument('--output', type=str, default='results/hyperparameter_tuning/weight_pareto_only.png',
+    parser.add_argument('--output', type=str, default='results/hyperparameter_tuning/style_weight_tuning.png',
                        help='Output filename for the plot')
     
     args = parser.parse_args()

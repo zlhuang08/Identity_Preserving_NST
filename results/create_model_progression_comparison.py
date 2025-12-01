@@ -2,7 +2,7 @@
 """
 Create final 6-image comparison grids showing progressive improvements:
 (1,1) Content | (1,2) Style | (1,3) 0_baseline
-(2,1) 1_identity | (2,2) 2_face_aware_plus_identity | (2,3) 3_all_combined
+(2,1) 1_identity | (2,2) 2_identity_plus_eye | (2,3) 2_face_aware_plus_identity (now labeled as "+ Face-Aware")
 
 With full metrics (SSIM, Perceptual Sim, Face Sim) on each generated image.
 
@@ -57,10 +57,10 @@ def load_precomputed_metrics(image_path):
         return None
 
 def create_progression_comparison(content_name, style_name, 
-                                   content_dir, style_dir,
-                                   baseline_dir, identity_dir,
-                                   face_aware_dir, all_combined_dir,
-                                   output_path):
+                                  content_dir, style_dir,
+                                  baseline_dir, identity_dir,
+                                  identity_eye_dir, all_combined_dir,
+                                  output_path):
     """Create 2×3 comparison grid with pre-computed metrics"""
     
     # Load original images
@@ -69,11 +69,11 @@ def create_progression_comparison(content_name, style_name,
     
     baseline_path = baseline_dir / f"{content_name}_{style_name}.jpg"
     identity_path = identity_dir / f"{content_name}_{style_name}.jpg"
-    face_aware_path = face_aware_dir / f"{content_name}_{style_name}.jpg"
+    identity_eye_path = identity_eye_dir / f"{content_name}_{style_name}.jpg"
     all_combined_path = all_combined_dir / f"{content_name}_{style_name}.jpg"
     
     # Check if all files exist
-    for path in [content_path, style_path, baseline_path, identity_path, face_aware_path, all_combined_path]:
+    for path in [content_path, style_path, baseline_path, identity_path, identity_eye_path, all_combined_path]:
         if not path.exists():
             print(f"⚠️  Missing file: {path}")
             return False
@@ -83,11 +83,11 @@ def create_progression_comparison(content_name, style_name,
     
     baseline_metrics = load_precomputed_metrics(baseline_path)
     identity_metrics = load_precomputed_metrics(identity_path)
-    face_aware_metrics = load_precomputed_metrics(face_aware_path)
+    identity_eye_metrics = load_precomputed_metrics(identity_eye_path)
     all_combined_metrics = load_precomputed_metrics(all_combined_path)
     
     # Check if all metrics were found
-    if None in [baseline_metrics, identity_metrics, face_aware_metrics, all_combined_metrics]:
+    if None in [baseline_metrics, identity_metrics, identity_eye_metrics, all_combined_metrics]:
         print(f"⚠️  Missing metrics files! Run inference with metrics calculation first.")
         return False
     
@@ -96,7 +96,7 @@ def create_progression_comparison(content_name, style_name,
     style_img = load_image_pil(style_path)
     baseline_img = load_image_pil(baseline_path)
     identity_img = load_image_pil(identity_path)
-    face_aware_img = load_image_pil(face_aware_path)
+    identity_eye_img = load_image_pil(identity_eye_path)
     all_combined_img = load_image_pil(all_combined_path)
     
     # Create figure (2 rows × 3 columns)
@@ -131,22 +131,22 @@ def create_progression_comparison(content_name, style_name,
     axes[1, 0].set_title(title_identity, fontsize=12, fontweight='bold', pad=10)
     axes[1, 0].axis('off')
     
-    # Row 2, Col 2: Face-aware + Identity
-    axes[1, 1].imshow(face_aware_img)
-    title_face_aware = (f'+ Face-Aware AdaIN\n'
-                        f'SSIM: {face_aware_metrics[0]:.3f} | '
-                        f'Percep: {face_aware_metrics[1]:.3f} | '
-                        f'Face: {face_aware_metrics[2]:.3f}')
-    axes[1, 1].set_title(title_face_aware, fontsize=12, fontweight='bold', pad=10)
+    # Row 2, Col 2: Identity + Eye
+    axes[1, 1].imshow(identity_eye_img)
+    title_identity_eye = (f'+ Eye Loss\n'
+                          f'SSIM: {identity_eye_metrics[0]:.3f} | '
+                          f'Percep: {identity_eye_metrics[1]:.3f} | '
+                          f'Face: {identity_eye_metrics[2]:.3f}')
+    axes[1, 1].set_title(title_identity_eye, fontsize=12, fontweight='bold', pad=10)
     axes[1, 1].axis('off')
     
-    # Row 2, Col 3: All Combined
+    # Row 2, Col 3: All Combined (but title shows "+ Face-Aware")
     axes[1, 2].imshow(all_combined_img)
-    title_all = (f'+ Eye-Specific Loss\n'
-                 f'SSIM: {all_combined_metrics[0]:.3f} | '
-                 f'Percep: {all_combined_metrics[1]:.3f} | '
-                 f'Face: {all_combined_metrics[2]:.3f}')
-    axes[1, 2].set_title(title_all, fontsize=12, fontweight='bold', pad=10)
+    title_all_combined = (f'+ Face-Aware\n'
+                          f'SSIM: {all_combined_metrics[0]:.3f} | '
+                          f'Percep: {all_combined_metrics[1]:.3f} | '
+                          f'Face: {all_combined_metrics[2]:.3f}')
+    axes[1, 2].set_title(title_all_combined, fontsize=12, fontweight='bold', pad=10)
     axes[1, 2].axis('off')
     
     # Save figure (no main title)
@@ -170,7 +170,7 @@ def main():
     result_base = project_root / "results" / "model_progression"
     baseline_dir = result_base / "0_baseline"
     identity_dir = result_base / "1_identity"
-    face_aware_dir = result_base / "2_face_aware_plus_identity"
+    identity_eye_dir = result_base / "2_identity_plus_eye"
     all_combined_dir = result_base / "3_all_combined"
     
     output_dir = result_base / "comparisons"
@@ -180,6 +180,10 @@ def main():
     print("✅ Using pre-computed metrics from inference (fast!)")
     print("   Metrics were computed on tensors before saving")
     print("   This ensures consistency with training metrics")
+    print()
+    print("📝 New progression layout:")
+    print("   Row 1: Content | Style | Baseline")
+    print("   Row 2: + Identity Loss | + Eye Loss | + Face-Aware (all three combined)")
     print()
     
     # Get all content and style combinations
@@ -205,7 +209,7 @@ def main():
                 content_name, style_name,
                 content_dir, style_dir,
                 baseline_dir, identity_dir,
-                face_aware_dir, all_combined_dir,
+                identity_eye_dir, all_combined_dir,
                 output_path
             )
             

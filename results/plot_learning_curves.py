@@ -7,7 +7,7 @@ This script creates a single comparison plot showing both training and validatio
 curves for different learning rates on the same axes.
 
 USAGE:
-    python plot_learning_curves_combined.py
+    python plot_learning_curves.py
 """
 
 import argparse
@@ -35,7 +35,7 @@ def extract_lr_from_dirname(dirname):
     return None
 
 
-def plot_learning_curves(checkpoint_base_dir, output_file='learning_rate_comparison_combined.png'):
+def plot_learning_curves(checkpoint_base_dir, output_file='learning_rate_tuning.png'):
     """
     Plot training and validation curves for all learning rate experiments on single plot.
     
@@ -98,151 +98,121 @@ def plot_learning_curves(checkpoint_base_dir, output_file='learning_rate_compari
         except:
             continue
     
-    # Find optimal LR (lowest validation loss)
+    # Find optimal LR (lowest final validation loss)
     if temp_results:
-        optimal_lr = min(temp_results, key=lambda x: x['final_val_loss'])['lr_value']
+        optimal_result = min(temp_results, key=lambda x: x['final_val_loss'])
+        optimal_lr_value = optimal_result['lr_value']
     else:
-        optimal_lr = None
+        optimal_lr_value = None
     
-    # Second pass: plot with optimal highlighted in red
+    # Second pass: plot all curves
     for result in temp_results:
         idx = result['idx']
         lr_dir = result['lr_dir']
         lr_value = result['lr_value']
         df = result['df']
         
-        # Format learning rate nicely
-        if lr_value >= 0.001:
-            lr_label = f"{lr_value:.4f}"
-        elif lr_value >= 0.0001:
-            lr_label = f"{lr_value:.5f}"
+        # Format learning rate for display
+        if lr_value >= 1e-4:
+            lr_display = f"{lr_value:.4f}"
         else:
-            lr_label = f"{lr_value:.0e}"
+            lr_display = f"{lr_value:.0e}"
         
-        print(f"✓ {lr_dir.name}: {len(df)} epochs, final train loss = {df['train_loss'].iloc[-1]:.4f}, val loss = {df['val_loss'].iloc[-1]:.4f}")
+        is_optimal = (lr_value == optimal_lr_value)
         
-        # Determine color and style
-        is_optimal = (lr_value == optimal_lr)
-        if is_optimal:
-            color = '#D81159'  # Red for optimal
-            linewidth = 3.5
-            alpha = 1.0
-            zorder = 10  # Plot on top
-            lr_label_display = f'{lr_label} ⭐ OPTIMAL'
-        else:
-            color = colors[idx]
-            linewidth = 2.5
-            alpha = 0.7
-            zorder = 5
-            lr_label_display = lr_label
+        # Plot styling
+        train_line_style = '-'
+        val_line_style = '--'
+        linewidth = 3.5 if is_optimal else 2.5
+        alpha = 1.0 if is_optimal else 0.7
+        zorder = 10 if is_optimal else 3
+        color = '#D81159' if is_optimal else colors[idx]  # Red for optimal, tab10 colors for others
         
-        # Plot training loss (solid line)
+        # Plot train loss (solid line)
         ax.plot(df['epoch'], df['train_loss'], 
-               color=color, linewidth=linewidth, linestyle='-',
-               marker='o', markersize=6 if is_optimal else 5, alpha=alpha,
-               label=f'LR={lr_label_display} (train)', zorder=zorder)
+               linestyle=train_line_style, linewidth=linewidth, 
+               color=color, alpha=alpha, zorder=zorder,
+               label=f'LR={lr_display} (Train)')
         
-        # Plot validation loss (dashed line, same color)
+        # Plot val loss (dashed line)
         ax.plot(df['epoch'], df['val_loss'], 
-               color=color, linewidth=linewidth, linestyle='--',
-               marker='s', markersize=6 if is_optimal else 5, alpha=alpha,
-               label=f'LR={lr_label_display} (val)', zorder=zorder)
+               linestyle=val_line_style, linewidth=linewidth, 
+               color=color, alpha=alpha, zorder=zorder,
+               label=f'LR={lr_display} (Val)')
         
-        # Store results for analysis
         lr_results.append({
             'lr': lr_value,
-            'lr_label': lr_label,
-            'final_train_loss': df['train_loss'].iloc[-1],
+            'lr_display': lr_display,
             'final_val_loss': df['val_loss'].iloc[-1],
-            'initial_train_loss': df['train_loss'].iloc[0],
-            'convergence_rate': df['train_loss'].iloc[0] - df['train_loss'].iloc[-1],
-            'epochs': len(df)
+            'final_train_loss': df['train_loss'].iloc[-1]
         })
+        
+        print(f"  {idx+1}. LR={lr_display}: Train Loss={df['train_loss'].iloc[-1]:.4f}, Val Loss={df['val_loss'].iloc[-1]:.4f}")
     
-    if not lr_results:
-        print("❌ No valid training curves found!")
-        return
-    
-    # Configure plot
+    # Styling
     ax.set_xlabel('Epoch', fontsize=14, fontweight='bold')
     ax.set_ylabel('Loss (log scale)', fontsize=14, fontweight='bold')
-    ax.set_title('Learning Rate Comparison: Training vs Validation Loss', 
-                fontsize=16, fontweight='bold', pad=20)
-    
-    # Legend with two columns for better organization
-    ax.legend(fontsize=9, loc='upper right', ncol=2, framealpha=0.95,
-             columnspacing=1.0, handlelength=2.5)
-    
+    ax.set_yscale('log')
     ax.grid(True, alpha=0.3, linestyle='--', linewidth=1)
-    ax.set_xlim(left=1)
-    ax.set_yscale('log')  # Use log scale for better differentiation
     
-    # Add best LR annotation
-    best_result = min(lr_results, key=lambda x: x['final_val_loss'])
-    summary_text = (
-        f"Best Learning Rate: {best_result['lr_label']}\n"
-        f"Final Val Loss: {best_result['final_val_loss']:.4f}\n"
-        f"Final Train Loss: {best_result['final_train_loss']:.4f}\n"
-        f"Convergence: {best_result['convergence_rate']:.2f}\n\n"
-        f"Solid lines: Training Loss\n"
-        f"Dashed lines: Validation Loss"
-    )
+    # Legend with custom description for line styles
+    handles, labels = ax.get_legend_handles_labels()
+    # Add custom legend entries for line styles
+    from matplotlib.lines import Line2D
+    custom_lines = [
+        Line2D([0], [0], color='gray', linestyle='-', linewidth=2.5, label='Train'),
+        Line2D([0], [0], color='gray', linestyle='--', linewidth=2.5, label='Val')
+    ]
     
-    ax.text(0.02, 0.98, summary_text, 
-           transform=ax.transAxes, fontsize=10,
-           verticalalignment='top', horizontalalignment='left',
-           bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.9, 
-                    edgecolor='black', linewidth=1.5))
+    # Combine custom lines with actual plot handles/labels
+    all_handles = custom_lines + handles
+    all_labels = ['Solid: Train', 'Dashed: Val'] + labels
     
-    # Adjust layout and save
+    ax.legend(all_handles, all_labels, loc='upper right', fontsize=9, 
+             framealpha=0.95, ncol=2)
+    
     plt.tight_layout()
-    plt.savefig(output_file, dpi=300, bbox_inches='tight', facecolor='white')
-    print(f"\n✅ Combined plot saved to: {output_file}")
     
-    # Print analysis
+    # Save figure
+    output_path = Path(output_file)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(output_path, dpi=300, bbox_inches='tight', facecolor='white')
+    print(f"\n✅ Combined plot saved to: {output_path}")
+    
+    # Summary
     print("\n" + "="*70)
-    print("Learning Rate Analysis")
+    print("Learning Rate Analysis Summary")
     print("="*70)
-    
-    # Sort by final validation loss
-    lr_results_sorted = sorted(lr_results, key=lambda x: x['final_val_loss'])
-    
-    print("\nRanked by Final Validation Loss:")
-    print(f"{'Rank':<6} {'LR':<15} {'Train Loss':<12} {'Val Loss':<12} {'Convergence':<12}")
-    print("-" * 70)
-    
-    for rank, result in enumerate(lr_results_sorted, 1):
-        marker = "⭐" if rank == 1 else "  "
-        print(f"{marker} {rank:<4} {result['lr_label']:<15} {result['final_train_loss']:<12.4f} "
-              f"{result['final_val_loss']:<12.4f} {result['convergence_rate']:<12.2f}")
-    
-    print("\n" + "="*70)
-    print(f"Recommendation: Use LR = {lr_results_sorted[0]['lr_label']} for best performance")
+    print(f"{'Learning Rate':<15} {'Final Train Loss':<18} {'Final Val Loss':<15}")
+    print("-"*70)
+    for lr in lr_results:
+        marker = '⭐' if lr['lr'] == optimal_lr_value else '  '
+        print(f"{marker} {lr['lr_display']:<13} {lr['final_train_loss']:<18.4f} {lr['final_val_loss']:<15.4f}")
+    print("="*70)
+    if optimal_lr_value:
+        print(f"Optimal Learning Rate: {[lr['lr_display'] for lr in lr_results if lr['lr'] == optimal_lr_value][0]}")
     print("="*70)
     
     plt.close()
-    return lr_results_sorted
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Plot combined learning rate comparison (train + val on same plot)",
-        formatter_class=argparse.RawDescriptionHelpFormatter
+        description="Plot combined training and validation curves for learning rate experiments"
     )
     
-    parser.add_argument('--checkpoint-dir', type=str, default='checkpoints',
-                        help='Base directory containing lr_* subdirectories (default: checkpoints)')
-    parser.add_argument('--output', type=str, default='results/hyperparameter_tuning/learning_rate_comparison_combined.png',
-                        help='Output filename for the plot')
+    parser.add_argument('--checkpoint-dir', type=str, default='checkpoints/hyperparameter_tuning/learning_rate',
+                       help='Base directory containing lr_* subdirectories')
+    parser.add_argument('--output', type=str, default='results/hyperparameter_tuning/learning_rate_tuning.png',
+                       help='Output filename for the combined plot')
     
     args = parser.parse_args()
     
     print("="*70)
-    print("Learning Rate Comparison Plotter (Combined Train + Val)")
+    print("Learning Rate Comparison Plot Generator (Combined)")
     print("="*70)
     print(f"Checkpoint directory: {args.checkpoint_dir}")
     print(f"Output file: {args.output}")
     print("="*70 + "\n")
     
     plot_learning_curves(args.checkpoint_dir, args.output)
-
