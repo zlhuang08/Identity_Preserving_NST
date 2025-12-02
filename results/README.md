@@ -25,13 +25,12 @@ results/
 │   ├── 3_all_combined/                      # Step 3: + Eye-specific loss (42 images)
 │   └── comparisons/                         # Progressive comparison grids (42 grids)
 │
-└── hyperparameter_tuning/                   # Hyperparameter analysis (39 MB)
+└── hyperparameter_tuning/                   # Hyperparameter analysis (~25 MB)
     ├── eye_weight_tuning.png                # Eye weight (β) analysis plot
     ├── learning_rate_tuning.png             # Learning rate analysis plot
     ├── identity_weight_tuning.png           # Identity weight (γ) Pareto trade-off plot
     ├── style_weight_tuning.png              # Content:Style Pareto curve
     ├── identity_comparisons/                # Identity weight comparison grids (10 grids)
-    ├── identity_weight/                     # Identity weight generated images (8 folders)
     └── style_comparisons/                   # Style weight comparison grids (10 grids)
 ```
 
@@ -43,12 +42,11 @@ results/
 |----------|-------|------|-------------|
 | **Model Progression Images** | 168 | 7.6 MB | 4 models × 2 faces × 21 styles |
 | **Model Progression Grids** | 42 | 315 MB | 2×3 comparison grids |
-| **Hyperparameter Analysis Plots** | 4 | ~2 MB | Key tuning visualizations |
+| **Hyperparameter Analysis Plots** | 4 | ~1 MB | Key tuning visualizations |
 | **Identity Comparison Grids** | 10 | 13 MB | Gamma tuning visual comparisons |
 | **Style Comparison Grids** | 10 | 11 MB | Content:Style weight comparisons |
-| **Identity Weight Images** | 336 | 15 MB | 8 γ values × 42 combinations |
 | **Scripts** | 7 | ~80 KB | Reproducibility scripts |
-| **Total** | 577 files | ~362 MB | Complete results |
+| **Total** | 241 files | ~347 MB | Complete results |
 
 ---
 
@@ -147,27 +145,7 @@ Contains analysis of all hyperparameter tuning experiments.
 - `identity_comparison_face_00010_potter_peter_rabbit.png`
 - `identity_comparison_face_00066_starry_night.png`
 
-### **3. Identity Weight Images (identity_weight/)**
-- **Folders:** 8 (gamma_0_00 through gamma_100000_00)
-- **Images per folder:** 42 (2 faces × 21 styles)
-- **Total images:** 336
-- **Purpose:** Source images for creating identity comparison grids
-- **Size:** ~15 MB
-
-**Folder structure:**
-```
-identity_weight/
-├── gamma_0_00/        # Baseline (γ=0)
-├── gamma_0_10/        # γ=0.1 (too weak)
-├── gamma_1_00/        # γ=1
-├── gamma_10_00/       # γ=10
-├── gamma_100_00/      # γ=100
-├── gamma_1000_00/     # γ=1000 (optimal)
-├── gamma_10000_00/    # γ=10000
-└── gamma_100000_00/   # γ=100000 (too strong)
-```
-
-### **4. Style Comparisons (style_comparisons/)**
+### **3. Style Comparisons (style_comparisons/)**
 - **Count:** 10 comparison grids (2 faces × 5 styles)
 - **Shows:** Visual progression across content:style weight ratios
 - **Layout:** Multi-panel grid showing ratios [1:1, 1:5, 1:10, 1:20, 1:50]
@@ -175,7 +153,7 @@ identity_weight/
 - **Size:** ~11 MB
 
 **Example files:**
-- `comparison_face_00010_peter_rabbit.png`
+- `comparison_face_00016_peter_rabbit.png`
 - `comparison_face_00066_great_wave.png`
 
 ---
@@ -212,7 +190,7 @@ Generate comparison grids for different identity weights (γ).
 python results/create_identity_comparison.py
 ```
 
-**Input:** `results/hyperparameter_tuning/identity_weight/gamma_*/` (336 images across 8 folders)
+**Input:** `results/hyperparameter_tuning/identity_comparisons/` (source images from identity weight experiments)
 
 **Output:** `results/hyperparameter_tuning/identity_comparisons/` (10 grids)
 
@@ -380,15 +358,14 @@ open results/hyperparameter_tuning/eye_weight_tuning.png
 
 | Directory | Size | Percentage | Description |
 |-----------|------|------------|-------------|
-| `model_progression/comparisons/` | 315 MB | 87.0% | Comparison grids (high-res PNG) |
-| `identity_weight/` | 15 MB | 4.1% | Identity weight images |
-| `identity_comparisons/` | 13 MB | 3.6% | Identity comparison grids |
-| `style_comparisons/` | 11 MB | 3.0% | Style comparison grids |
+| `model_progression/comparisons/` | 315 MB | 90.8% | Comparison grids (high-res PNG) |
+| `identity_comparisons/` | 13 MB | 3.7% | Identity comparison grids |
+| `style_comparisons/` | 11 MB | 3.2% | Style comparison grids |
 | `model_progression/0_baseline/` | 1.9 MB | 0.5% | Baseline images |
 | `model_progression/1_identity/` | 1.9 MB | 0.5% | Identity images |
-| `model_progression/2_face_aware_plus_identity/` | 1.9 MB | 0.5% | Face-aware images |
+| `model_progression/2_identity_plus_eye/` | 1.9 MB | 0.5% | Identity+Eye images |
 | `model_progression/3_all_combined/` | 1.9 MB | 0.5% | All combined images |
-| **Total** | **~362 MB** | **100%** | Complete results |
+| **Total** | **~347 MB** | **100%** | Complete results (after cleanup) |
 
 ---
 
@@ -434,10 +411,10 @@ open results/hyperparameter_tuning/eye_weight_tuning.png
 ### **Best Visualizations to Include:**
 
 **Model Progression (5 examples):**
-1. `model_progression/comparisons/progression_face_00010_potter_peter_rabbit.png`
-2. `model_progression/comparisons/progression_face_00010_starry_night.png`
+1. `model_progression/comparisons/progression_face_00016_potter_peter_rabbit.png`
+2. `model_progression/comparisons/progression_face_00016_starry_night.png`
 3. `model_progression/comparisons/progression_face_00066_great_wave.png`
-4. `model_progression/comparisons/progression_face_00010_the_scream.png`
+4. `model_progression/comparisons/progression_face_00016_the_scream.png`
 5. `model_progression/comparisons/progression_face_00066_water_lilies.png`
 
 **Hyperparameter Analysis (4 plots):**
@@ -448,7 +425,8 @@ open results/hyperparameter_tuning/eye_weight_tuning.png
 
 ---
 
-**Last Updated:** November 29, 2025  
-**Total Size:** ~362 MB  
-**Status:** Clean, organized, and ready for final report
+**Last Updated:** December 2, 2025  
+**Total Size:** ~347 MB (cleaned up)  
+**Status:** Clean, organized, and ready for final report  
+**Cleanup Notes:** Removed identity_weight folder (15 MB) and face_00010 results (159 MB)
 

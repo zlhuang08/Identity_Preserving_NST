@@ -752,13 +752,7 @@ class AdaINStyleTransfer(nn.Module):
         stylized_feat = self.adain(content_feat, style_feat)
         
         # ========================================
-        # Step 3: Optional global style strength control
-        # ========================================
-        if alpha < 1.0:
-            stylized_feat = alpha * stylized_feat + (1 - alpha) * content_feat
-        
-        # ========================================
-        # Step 4: Face-aware blending at feature level
+        # Step 3: Face-aware blending at feature level
         # ========================================
         # Key insight: Blend features, not pixels!
         # This preserves facial structure while allowing stylization
@@ -775,8 +769,8 @@ class AdaINStyleTransfer(nn.Module):
         
         # Create preserved features for face regions
         # These have less stylization (more content preservation)
-        # preserved = (1 - α) * content + α * stylized
-        # α = face_preservation_alpha controls how much stylization
+        # preserved = (1 - α_face) * content + α_face * stylized
+        # α_face = face_preservation_alpha controls how much stylization in faces
         preserved_feat = (1 - face_preservation_alpha) * content_feat + \
                         face_preservation_alpha * stylized_feat
         
@@ -786,6 +780,15 @@ class AdaINStyleTransfer(nn.Module):
         # - Smooth transition (mask=0.5): Blend 50/50
         output_feat = face_masks_resized * preserved_feat + \
                      (1 - face_masks_resized) * stylized_feat
+        
+        # ========================================
+        # Step 4: Apply global alpha (FIXED: moved to after face-aware blending)
+        # ========================================
+        # If alpha < 1.0, blend the ENTIRE face-aware result back towards content
+        # This provides global control over overall stylization strength
+        # Works correctly with face-aware because it's applied AFTER the regional blending
+        if alpha < 1.0:
+            output_feat = alpha * output_feat + (1 - alpha) * content_feat
         
         # ========================================
         # Step 5: Decode features back to image

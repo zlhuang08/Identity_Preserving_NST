@@ -64,6 +64,7 @@ import numpy as np
 import contextlib
 from PIL import Image
 import warnings
+import lpips  # LPIPS for perceptual loss
 
 # ============================================================================
 # OPTIONAL DEPENDENCIES
@@ -892,97 +893,96 @@ class IdentityPreserver:
         batch_size = generated_images.size(0)
         
         # ========================================
-        # Step 1: Detect and extract faces from original images
+        # Step 1: Detect faces ONLY on content images (CRITICAL FIX!)
         # ========================================
+        # ROBUSTNESS IMPROVEMENT: By detecting only on content images and using
+        # those bounding boxes to crop BOTH content and generated images, we ensure:
+        # 1. We always get matching pairs (no "face not detected" in stylized images)
+        # 2. Model gets feedback even when stylized faces are heavily distorted
+        # 3. Training is more stable (no disappearing gradients when face detection fails)
         content_faces, content_indices, content_boxes = \
             self.detector.extract_faces(content_images, target_size=160)
-        # content_faces: (N, 3, 160, 160) or None
+        # Returns:
+        # content_faces: (N, 3, 160, 160) tensor of face crops or None
         # content_indices: [0, 1, 1, 3] - which image each face came from
-        # Example: [0, 1, 1, 3] means faces from images 0, 1, 1, and 3
-        #          (image 1 had 2 faces, image 2 had no faces)
+        # content_boxes: [(x1, y1, x2, y2), ...] - bounding boxes for each face
         
         # ========================================
-        # Step 2: Detect and extract faces from stylized images
+        # Step 2: Handle case where no faces detected in content
         # ========================================
-        gen_faces, gen_indices, gen_boxes = \
-            self.detector.extract_faces(generated_images, target_size=160)
-        # gen_faces: (M, 3, 160, 160) or None
-        # gen_indices: Similar to content_indices
-        
-        # ========================================
-        # Step 3: Handle case where no faces detected
-        # ========================================
-        if content_faces is None or gen_faces is None:
-            # No faces found in one or both sets
+        if content_faces is None or len(content_faces) == 0:
+            # No faces found in content images
             # Return zero loss (don't penalize the model for images without faces)
             metrics = {
-                'num_content_faces': 0 if content_faces is None else len(content_faces),
-                'num_gen_faces': 0 if gen_faces is None else len(gen_faces),
+                'num_content_faces': 0,
+                'num_gen_faces': 0,
                 'num_matched_faces': 0,
                 'avg_similarity': 0.0
             }
             return torch.tensor(0.0, device=self.device), metrics
         
         # ========================================
-        # Step 4: Match faces from corresponding images
+        # Step 3: Use content bounding boxes to crop generated images
         # ========================================
-        # We need to pair faces from the same source image
-        # Example: If batch has images [A, B, C, D]:
-        #   - Face from A's original should match with face from A's stylized
-        #   - Face from B's original should match with face from B's stylized
-        matched_content_faces = []  # Will store matched original faces
-        matched_gen_faces = []      # Will store matched stylized faces
+        # CRITICAL: This ensures we ALWAYS get a face crop from generated images,
+        # even if the stylization made the face undetectable by the detector
+        gen_faces = []
+        gen_indices = []
         
-        for i in range(batch_size):
-            # ========================================
-            # Find faces from image i in both sets
-            # ========================================
-            # content_mask: [True, False, False, ...] marks which faces came from image i
-            content_mask = [idx == i for idx in content_indices]
-            gen_mask = [idx == i for idx in gen_indices]
+        for face_idx, (img_idx, box) in enumerate(zip(content_indices, content_boxes)):
+            # Extract the region from generated image using content's bounding box
+            x1, y1, x2, y2 = box
+            # Ensure coordinates are within image bounds
+            h, w = generated_images.shape[2:]
+            x1, y1 = max(0, int(x1)), max(0, int(y1))
+            x2, y2 = min(w, int(x2)), min(h, int(y2))
             
-            # ========================================
-            # If both sets have a face from image i, match them
-            # ========================================
-            if any(content_mask) and any(gen_mask):
-                # Get index of first face from image i in each set
-                content_idx = content_mask.index(True)  # First True position
-                gen_idx = gen_mask.index(True)
-                
-                # Add the matched pair to our lists
-                matched_content_faces.append(content_faces[content_idx])
-                matched_gen_faces.append(gen_faces[gen_idx])
+            # SAFETY CHECK: Ensure the crop has valid dimensions
+            # (prevents crash if box falls outside image or has zero area)
+            if x2 <= x1 or y2 <= y1:
+                continue
+            
+            # Crop the face region
+            face_crop = generated_images[img_idx, :, y1:y2, x1:x2]
+            
+            # Resize to target size (160x160 for FaceNet)
+            face_crop_resized = F.interpolate(
+                face_crop.unsqueeze(0), 
+                size=(160, 160), 
+                mode='bilinear', 
+                align_corners=False
+            ).squeeze(0)
+            
+            gen_faces.append(face_crop_resized)
+            gen_indices.append(img_idx)
         
         # ========================================
-        # Step 5: Handle case where no matches found
+        # Step 4: Stack all faces into tensors
         # ========================================
-        if len(matched_content_faces) == 0:
-            # Faces detected but no matching pairs
-            # (e.g., face detected in original but not in stylized)
+        # Now we have perfect 1:1 matching between content and generated faces
+        # List of (3, 160, 160) → (N, 3, 160, 160)
+        matched_content_faces = content_faces  # Already a tensor
+        matched_gen_faces = torch.stack(gen_faces) if gen_faces else None
+        
+        # Sanity check
+        if matched_gen_faces is None or len(matched_content_faces) != len(matched_gen_faces):
             metrics = {
                 'num_content_faces': len(content_faces),
-                'num_gen_faces': len(gen_faces),
+                'num_gen_faces': len(gen_faces) if gen_faces else 0,
                 'num_matched_faces': 0,
                 'avg_similarity': 0.0
             }
             return torch.tensor(0.0, device=self.device), metrics
-        
-        # ========================================
-        # Step 6: Stack matched faces into tensors
-        # ========================================
-        # List of (3, 160, 160) → (N, 3, 160, 160)
-        matched_content_faces = torch.stack(matched_content_faces)
-        matched_gen_faces = torch.stack(matched_gen_faces)
         
         # ========================================
         # Step 7: Extract identity embeddings
         # ========================================
         # Convert face images to 512-d identity vectors
-        # IMPORTANT: allow_grad=True enables gradient flow for training
-        # The face recognition model parameters are frozen, but gradients
-        # flow through it to update the style transfer model
-        content_embeddings = self.recognizer.extract_embeddings(matched_content_faces, allow_grad=True)  # (N, 512)
-        gen_embeddings = self.recognizer.extract_embeddings(matched_gen_faces, allow_grad=True)          # (N, 512)
+        # OPTIMIZATION: Content embeddings don't need gradients (fixed reference)
+        # Only generated embeddings need gradients to update the style transfer model
+        # ========================================
+        content_embeddings = self.recognizer.extract_embeddings(matched_content_faces, allow_grad=False)  # (N, 512) - No grad needed
+        gen_embeddings = self.recognizer.extract_embeddings(matched_gen_faces, allow_grad=True)           # (N, 512) - Needs grad
         
         # ========================================
         # Step 8: Compute identity loss
@@ -1136,35 +1136,21 @@ class SimpleFaceDetector:
 
 class EyeSpecificLoss(nn.Module):
     """
-    Eye-Specific Loss for Identity-Preserving Style Transfer.
+    Enhanced Eye-Specific Loss with Structure and Edge Constraints.
     
-    MOTIVATION:
-    Eyes are THE most critical feature for identity recognition!
+    IMPROVEMENTS & ADVICE IMPLEMENTED:
+    1. Increased Crop Size (32 -> 48): Captures eyebrows and context to prevent "floating" eyes.
+    2. Gaussian Masking: Eliminates "square artifacts" by softening the crop edges.
+    3. Weighted VGG Layers: Prioritizes relu2_1 (structure) over relu3_1 (texture) to fix "swollen" eyes.
+    4. Sobel Edge Loss: Explicitly penalizes blurry boundaries to keep eyelids/iris sharp.
+    5. Landmark Consistency: Detects on CONTENT image only to ensure stable cropping.
     
-    "The eyes are the windows to the soul" - they carry more identity information
-    than any other facial feature. By focusing preservation specifically on eye
-    regions, we can achieve better identity preservation with less impact on overall
-    stylization quality.
-    
-    WHY EYES MATTER:
-    Research in psychology and computer vision shows that humans rely heavily on
-    eyes for face recognition:
-    - Eye shape is unique to each person
-    - Eye spacing (interpupillary distance) is identity-critical
-    - Eye expression conveys personality
-    - When eyes are preserved, faces remain recognizable even with heavy stylization
-    
-    APPROACH:
-    1. Detect eye landmarks using MTCNN (left_eye, right_eye)
-    2. Extract eye region features (bounding box around each eye)
-    3. Compute perceptual loss specifically on eye regions
-    4. Use VGG features (same as content/style loss for consistency)
-    
-    ADVANTAGES OVER FULL-FACE IDENTITY LOSS:
-    - More focused: Targets the most identity-critical features
-    - Complementary: Can be used WITH face-aware AdaIN or identity loss
-    - Efficient: Smaller regions = faster computation
-    - Interpretable: Clear what's being preserved (eyes vs. entire face)
+    WHY THESE CHANGES MATTER:
+    - **Gaussian Masking**: Fixes hard square outlines visible around eyes in stylized images
+    - **Sobel Edge Loss**: Prevents "swollen" or "blobby" eyes by enforcing sharp boundaries
+    - **relu2_1 + relu3_1**: Balances low-level structure (edges, shape) with mid-level texture
+    - **Larger Crop (48×48)**: Includes eyebrows ("ceiling" for eyes), reduces artifacts
+    - **Weighted Loss**: Heavy weight on structure (λ=4.0) ensures shape preservation
     
     USAGE:
         eye_loss_module = EyeSpecificLoss(device='cuda')
@@ -1181,232 +1167,330 @@ class EyeSpecificLoss(nn.Module):
     
     def __init__(self, device='cuda', feature_extractor=None):
         """
-        Initialize eye-specific loss computation.
+        Initialize enhanced eye-specific loss computation.
         
         Args:
             device: Device to run on ('cuda' or 'cpu')
             feature_extractor: Optional VGG feature extractor
-                             If None, will create one internally
-        
-        Example:
-            # Standard initialization
-            eye_loss = EyeSpecificLoss(device='cuda')
-            
-            # Share VGG with style transfer model
-            from model_adain import import AdaINStyleTransfer
-            model = AdaINStyleTransfer(...)
-            eye_loss = EyeSpecificLoss(device='cuda', feature_extractor=model.encoder)
+                             If None, will create one internally (relu2_1 + relu3_1)
         """
-        super().__init__()  # Initialize nn.Module
+        super().__init__()
         self.device = device
         
-        # Face detector for eye landmark detection
+        # Face detector (assumed to be available from your utils)
         self.detector = FaceDetector(device=device, keep_all=False)
         
-        # Feature extractor (VGG19) for perceptual loss on eyes
+        # ---------------------------------------------------------------------
+        # ADVICE: Use shallower layers for structure, avoiding deep semantic layers
+        # like relu4_1 which allow spatial invariance (causing "swollen" eyes).
+        # ---------------------------------------------------------------------
         if feature_extractor is None:
-            # Import VGG here to avoid circular dependency
             import torchvision.models as models
             vgg = models.vgg19(pretrained=True).features.to(device).eval()
-            
-            # We'll use relu2_1 features (similar to content loss)
-            # This captures mid-level features: shapes, edges, textures
-            self.feature_extractor = nn.Sequential(*list(vgg.children())[:10])
-            
-            # Freeze feature extractor
-            for param in self.feature_extractor.parameters():
+            # We need up to relu3_1 (index 12). relu2_1 is at index 7.
+            self.vgg_layers = vgg[:13]
+            for param in self.vgg_layers.parameters():
                 param.requires_grad = False
         else:
-            self.feature_extractor = feature_extractor
+            self.vgg_layers = feature_extractor
         
-        # ========================================
-        # ImageNet normalization (CRITICAL!)
-        # ========================================
-        # VGG19 was trained on ImageNet with these normalization values
-        # We MUST apply the same normalization or features will be wrong!
-        # Without this, eye loss optimizes for incorrect targets → dim eyes!
+        # ImageNet normalization (Standard VGG requirement)
         self.register_buffer('mean', torch.tensor([0.485, 0.456, 0.406], device=device).view(1, -1, 1, 1))
         self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225], device=device).view(1, -1, 1, 1))
-    
-    def extract_eye_regions(self, images, landmarks, eye_size=48):
-        """
-        Extract eye regions from images given eye landmarks.
         
-        For each detected eye (left and right), we:
-        1. Get eye center from landmarks
-        2. Create bounding box around eye (eye_size × eye_size pixels)
-        3. Crop and return the eye region
+        # ---------------------------------------------------------------------
+        # ADVICE: Increase crop size to capture eyebrows ("ceiling" for the eye).
+        # ---------------------------------------------------------------------
+        self.eye_size = 48
+        
+        # ---------------------------------------------------------------------
+        # ADVICE: Pre-calculate Gaussian Mask to fix "Square Artifacts".
+        # ---------------------------------------------------------------------
+        self.register_buffer('spatial_mask', self._create_gaussian_mask(self.eye_size))
+        
+        # ---------------------------------------------------------------------
+        # ADVICE: Pre-calculate Sobel Filters for "Edge Loss" (Anti-swelling).
+        # ---------------------------------------------------------------------
+        self._init_sobel_filters()
+        
+        # ---------------------------------------------------------------------
+        # UPGRADE 1: LPIPS Loss (Perceptual Beauty Loss)
+        # This replaces/augments VGG loss for better realism and crispness.
+        # LPIPS is trained to match human perception of image quality.
+        # ---------------------------------------------------------------------
+        self.lpips = lpips.LPIPS(net='vgg').to(device)
+        for param in self.lpips.parameters():
+            param.requires_grad = False
+        
+        # ---------------------------------------------------------------------
+        # ADVICE: Hyperparameters for loss weighting.
+        # Structure (relu2_1) is weighted highest to enforce shape.
+        # UPGRADE: Added LPIPS and Color preservation weights.
+        # ---------------------------------------------------------------------
+        self.lambda_structure = 4.0  # relu2_1: Sharpness/Shape
+        self.lambda_pattern = 1.0    # relu3_1: Texture/Context
+        self.lambda_edge = 2.0       # Sobel:   Boundary precision
+        self.lambda_lpips = 0.8      # LPIPS:   Perceptual beauty
+        self.lambda_color = 0.5      # Color:   Iris color preservation
+    
+    def _create_gaussian_mask(self, size):
+        """
+        Creates a 2D gaussian mask to soften crop edges.
+        Fixes: Visible square outlines around the eyes.
+        """
+        x = torch.linspace(-1, 1, size)
+        y = torch.linspace(-1, 1, size)
+        xx, yy = torch.meshgrid(x, y, indexing='ij')
+        dist = torch.sqrt(xx**2 + yy**2)
+        
+        # Sigma 0.5 creates a nice falloff that is near 0 at the edges
+        mask = torch.exp(-(dist**2) / 0.5)
+        return mask.unsqueeze(0).unsqueeze(0).to(self.device)
+    
+    def _init_sobel_filters(self):
+        """
+        Initializes Sobel kernels for edge detection.
+        FIX: Uses (3, 1, 3, 3) shape to process RGB channels independently.
+        """
+        # Base kernel (1, 1, 3, 3)
+        sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], 
+                               dtype=torch.float32, device=self.device).view(1, 1, 3, 3)
+        sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], 
+                               dtype=torch.float32, device=self.device).view(1, 1, 3, 3)
+        
+        # FIX: Repeat along output dimension (dim 0), NOT input dimension (dim 1).
+        # Target Shape: (3, 1, 3, 3) -> 3 output channels, 1 input channel per group
+        self.register_buffer('sobel_x', sobel_x.repeat(3, 1, 1, 1))
+        self.register_buffer('sobel_y', sobel_y.repeat(3, 1, 1, 1))
+    
+    def get_vgg_features(self, x):
+        """Extract features specifically from relu2_1 and relu3_1."""
+        features = {}
+        out = x
+        for name, layer in self.vgg_layers.named_children():
+            out = layer(out)
+            # relu2_1 (Structure/Edges) -> Index '6' (ReLU activation, standard for perceptual loss)
+            if name == '6':
+                features['relu2_1'] = out
+            # relu3_1 (Texture/Patterns) -> Index '11' (ReLU activation, standard for perceptual loss)
+            elif name == '11':
+                features['relu3_1'] = out
+                break
+        return features
+    
+    def get_edge_features(self, x):
+        """
+        Compute edge map using Sobel filters on the raw pixel input.
+        Returns a map showing where the hard boundaries (eyelids, iris) are.
+        """
+        # FIX: Use groups=3 to apply the filter to each RGB channel independently
+        # Input: (B, 3, H, W) -> Output: (B, 3, H, W)
+        gx = F.conv2d(x, self.sobel_x, padding=1, groups=3)
+        gy = F.conv2d(x, self.sobel_y, padding=1, groups=3)
+        
+        # Calculate magnitude per channel
+        # Added epsilon for numerical stability
+        edges_per_channel = torch.sqrt(gx**2 + gy**2 + 1e-6)
+        
+        # Combine channels: Average the edge magnitudes to get a single map
+        # Output: (B, 1, H, W)
+        return edges_per_channel.mean(dim=1, keepdim=True)
+    
+    def compute_color_loss(self, gen, content):
+        """
+        UPGRADE 2: Color Preservation Loss
+        
+        Matches color statistics (Mean & Std) between generated and content eyes.
+        Keeps the eyes looking like the original person's eyes, not the painting's.
+        
+        WHY: Style transfer often washes out natural eye color (e.g., turning blue
+        eyes into muddy brown). This forces the model to preserve the original
+        iris color while still allowing texture stylization.
         
         Args:
-            images: (B, 3, H, W) tensor in [0, 1] range
-            landmarks: List/array of landmarks from MTCNN
-                      Each element can be:
-                      - None (no face detected)
-                      - ndarray (N, 5, 2) where N=number of faces, 5=landmarks, 2=(x,y)
-            eye_size: Size of extracted eye region (default: 48×48 pixels)
+            gen: Generated eye crops (B, 3, H, W)
+            content: Content eye crops (B, 3, H, W)
         
         Returns:
-            eye_regions: List of (3, eye_size, eye_size) tensors
-                        One tensor per detected eye
-            eye_indices: List of (batch_idx, eye_type) tuples
-                        eye_type: 0=left eye, 1=right eye
-        
-        Example:
-            eyes, indices = self.extract_eye_regions(images, landmarks)
-            print(f"Extracted {len(eyes)} eyes")
-            # eyes[0]: left eye from first image
-            # eyes[1]: right eye from first image
+            color_loss: MSE between color statistics (mean + std per channel)
         """
+        # Calculate mean and std per channel (R, G, B)
+        # Input shape: (B, 3, H, W) -> Flatten spatial dims
+        gen_flat = gen.view(gen.size(0), 3, -1)
+        content_flat = content.view(content.size(0), 3, -1)
+
+        gen_mean = gen_flat.mean(dim=2)
+        gen_std = gen_flat.std(dim=2)
+        
+        content_mean = content_flat.mean(dim=2)
+        content_std = content_flat.std(dim=2)
+
+        # MSE between statistics
+        loss_mean = F.mse_loss(gen_mean, content_mean)
+        loss_std = F.mse_loss(gen_std, content_std)
+        return loss_mean + loss_std
+    
+    def extract_eye_regions(self, images, landmarks):
+        """Extract eye regions based on provided landmarks."""
         eye_regions = []
-        eye_indices = []
+        indices = []  # Stores (batch_idx, eye_type)
         
         for batch_idx, (img, landmark) in enumerate(zip(images, landmarks)):
             if landmark is None:
-                continue  # No face detected
+                continue
             
-            # Handle different landmark formats
-            # MTCNN returns shape (N, 5, 2) where N=number of faces
+            # Normalize landmark format
             if isinstance(landmark, np.ndarray):
-                if landmark.ndim == 3:  # (N, 5, 2)
-                    landmark = landmark[0]  # Take first face: (5, 2)
-                elif landmark.ndim != 2:  # Should be (5, 2) now
-                    continue
+                if landmark.ndim == 3:
+                    landmark = landmark[0]
             
-            H, W = img.shape[1:]  # Image height and width
+            H, W = img.shape[1:]
             
-            # Extract both eyes
-            for eye_idx in range(2):  # 0=left eye, 1=right eye
+            # 0=left eye, 1=right eye
+            for eye_idx in range(2):
                 try:
                     eye_x, eye_y = landmark[eye_idx]
-                except (IndexError, ValueError):
-                    continue  # Skip if landmark not available
-                
-                # Create bounding box around eye
-                # Center at (eye_x, eye_y), size eye_size×eye_size
-                half_size = eye_size // 2
-                x1 = max(0, int(eye_x - half_size))
-                y1 = max(0, int(eye_y - half_size))
-                x2 = min(W, int(eye_x + half_size))
-                y2 = min(H, int(eye_y + half_size))
-                
-                # Skip if region is too small
-                if (x2 - x1) < 20 or (y2 - y1) < 20:
+                except:
                     continue
                 
-                # Crop eye region
+                half = self.eye_size // 2
+                x1 = max(0, int(eye_x - half))
+                y1 = max(0, int(eye_y - half))
+                x2 = min(W, int(eye_x + half))
+                y2 = min(H, int(eye_y + half))
+                
+                # Skip edge cases where crop is too small
+                if (x2 - x1) < self.eye_size or (y2 - y1) < self.eye_size:
+                    continue
+                
+                # Crop
                 eye_region = img[:, y1:y2, x1:x2]
                 
-                # Resize to standard size
+                # Resize to ensure strict 48x48 input for VGG
                 eye_region = F.interpolate(
                     eye_region.unsqueeze(0),
-                    size=(eye_size, eye_size),
+                    size=(self.eye_size, self.eye_size),
                     mode='bilinear',
                     align_corners=False
                 ).squeeze(0)
                 
                 eye_regions.append(eye_region)
-                eye_indices.append((batch_idx, eye_idx))
+                indices.append((batch_idx, eye_idx))
         
-        return eye_regions, eye_indices
+        return eye_regions, indices
     
     def compute_eye_loss(self, generated_images, content_images):
         """
-        Compute eye-specific perceptual loss.
+        Compute total weighted eye loss.
         
-        THE PIPELINE:
-        1. Detect eye landmarks in both content and generated images
-        2. Extract eye regions (48×48 patches around each eye)
-        3. Pass through VGG to get features
-        4. Compute MSE between content and generated eye features
-        5. Return loss + metrics
+        CRITICAL FIX: Landmark Consistency
+        - Detect ONLY on content images. Use those coordinates for both.
+        - This prevents the loss from "chasing a moving target" if the
+          stylized face distorts slightly.
         
         Args:
-            generated_images: (B, 3, H, W) tensor - stylized outputs
-            content_images: (B, 3, H, W) tensor - original photos
+            generated_images: (B, 3, H, W)
+            content_images: (B, 3, H, W)
         
         Returns:
-            loss: Scalar tensor - eye-specific loss
+            total_loss: Weighted sum of structure + pattern + edge losses
             metrics: Dict with diagnostic information
-                - num_eyes_content: Number of eyes detected in content
-                - num_eyes_generated: Number of eyes detected in generated
-                - num_matched_eyes: Number of eye pairs successfully compared
-        
-        GRACEFUL FAILURE:
-        - If no eyes detected: returns zero loss (doesn't crash!)
-        - If only some eyes detected: computes loss on available pairs
-        - Metrics help you diagnose detection issues
-        
-        Example:
-            eye_loss, metrics = eye_loss_module.compute_eye_loss(stylized, original)
-            
-            if metrics['num_matched_eyes'] > 0:
-                total_loss += 100.0 * eye_loss  # Weight β=100
-            else:
-                print("Warning: No eyes detected, skipping eye loss")
         """
         batch_size = generated_images.size(0)
+        metrics = {}
         
-        # Detect eye landmarks
-        _, _, content_landmarks = self.detector.detect(content_images)
-        _, _, gen_landmarks = self.detector.detect(generated_images)
+        # ---------------------------------------------------------------------
+        # ADVICE: Landmark Consistency
+        # Detect ONLY on content images. Use those coordinates for both.
+        # ---------------------------------------------------------------------
+        with torch.no_grad():
+            _, _, content_landmarks = self.detector.detect(content_images)
         
-        # Extract eye regions
-        content_eyes, content_indices = self.extract_eye_regions(
-            content_images, content_landmarks
-        )
-        gen_eyes, gen_indices = self.extract_eye_regions(
-            generated_images, gen_landmarks
-        )
+        # Extract crops
+        content_eyes, c_indices = self.extract_eye_regions(content_images, content_landmarks)
+        gen_eyes, g_indices = self.extract_eye_regions(generated_images, content_landmarks)
         
-        # Initialize metrics
-        metrics = {
-            'num_eyes_content': len(content_eyes),
-            'num_eyes_generated': len(gen_eyes),
-            'num_matched_eyes': 0
-        }
-        
-        # If no eyes detected, return zero loss
-        if len(content_eyes) == 0 or len(gen_eyes) == 0:
+        # Basic validation: ensure we found eyes
+        if len(content_eyes) == 0:
+            metrics['num_eyes'] = 0
             return torch.tensor(0.0, device=self.device, requires_grad=True), metrics
         
-        # Match corresponding eyes
-        # Create dict: (batch_idx, eye_type) -> eye_region
-        content_eye_dict = {idx: eye for eye, idx in zip(content_eyes, content_indices)}
-        gen_eye_dict = {idx: eye for eye, idx in zip(gen_eyes, gen_indices)}
+        # Stack them into tensors for batch processing
+        content_batch = torch.stack(content_eyes)
+        gen_batch = torch.stack(gen_eyes)
         
-        # Find matching eye pairs
-        matched_pairs = []
-        for idx in content_eye_dict.keys():
-            if idx in gen_eye_dict:
-                matched_pairs.append((content_eye_dict[idx], gen_eye_dict[idx]))
+        # ---------------------------------------------------------------------
+        # UPGRADE 2: Color Preservation (Compute on RAW pixels before masking)
+        # We want the center of the eye to have the same color distribution
+        # as the original photo. This brings back the natural eye color and "life".
+        # ---------------------------------------------------------------------
+        loss_color = self.compute_color_loss(gen_batch, content_batch)
         
-        metrics['num_matched_eyes'] = len(matched_pairs)
+        # ---------------------------------------------------------------------
+        # CRITICAL FIX: Compute edges BEFORE masking!
+        # The Gaussian mask creates artificial gradients at boundaries.
+        # If we mask first, Sobel filters detect the mask edge as a feature.
+        # By computing edges first, we only compare real eye structure.
+        # ---------------------------------------------------------------------
+        c_edges_raw = self.get_edge_features(content_batch)
+        g_edges_raw = self.get_edge_features(gen_batch)
         
-        # If no matches, return zero loss
-        if len(matched_pairs) == 0:
-            return torch.tensor(0.0, device=self.device, requires_grad=True), metrics
+        # Now apply mask to edge maps (focus on center, ignore boundary noise)
+        c_edges = c_edges_raw * self.spatial_mask
+        g_edges = g_edges_raw * self.spatial_mask
+        loss_edge = F.l1_loss(g_edges, c_edges)
         
-        # Stack matched eyes into batches
-        content_eye_batch = torch.stack([pair[0] for pair in matched_pairs])
-        gen_eye_batch = torch.stack([pair[1] for pair in matched_pairs])
+        # ---------------------------------------------------------------------
+        # ADVICE: VGG Loss - Mask pixels BEFORE feature extraction
+        # For pixel/VGG loss, we MUST mask first to avoid square artifacts
+        # ---------------------------------------------------------------------
+        content_masked = content_batch * self.spatial_mask
+        gen_masked = gen_batch * self.spatial_mask
         
-        # ========================================
-        # CRITICAL: Apply ImageNet normalization
-        # ========================================
-        # VGG19 expects normalized inputs!
-        # Without this, features are computed on wrong scale → dim eyes!
-        content_eye_batch = (content_eye_batch - self.mean) / self.std
-        gen_eye_batch = (gen_eye_batch - self.mean) / self.std
+        # ---------------------------------------------------------------------
+        # UPGRADE 1: LPIPS Loss (Perceptual Beauty Loss)
+        # LPIPS expects inputs in [-1, 1]. Our images are [0, 1].
+        # Normalize: (x * 2) - 1
+        # ---------------------------------------------------------------------
+        c_lpips_input = (content_masked * 2) - 1
+        g_lpips_input = (gen_masked * 2) - 1
         
-        # Extract VGG features
-        with torch.set_grad_enabled(True):  # Need gradients for backprop!
-            content_features = self.feature_extractor(content_eye_batch)
-            gen_features = self.feature_extractor(gen_eye_batch)
+        # Compute LPIPS on the masked eye regions
+        # This optimizes for human perception of beauty/realism
+        loss_lpips = self.lpips(g_lpips_input, c_lpips_input).mean()
         
-        # Compute MSE loss
-        eye_loss = F.mse_loss(gen_features, content_features)
+        # ---------------------------------------------------------------------
+        # ADVICE: Weighted VGG Loss
+        # 1. Normalize images for VGG (ImageNet stats)
+        # 2. Extract shallow features (relu2_1, relu3_1)
+        # ---------------------------------------------------------------------
+        c_norm = (content_masked - self.mean) / self.std
+        g_norm = (gen_masked - self.mean) / self.std
         
-        return eye_loss, metrics
+        c_feats = self.get_vgg_features(c_norm)
+        g_feats = self.get_vgg_features(g_norm)
+        
+        # Calculate MSE for features
+        # ADVICE: Heavy weight on relu2_1 to fix swelling/shape issues
+        loss_structure = F.mse_loss(g_feats['relu2_1'], c_feats['relu2_1'])
+        
+        # ADVICE: Lower weight on relu3_1 for general texture/context
+        loss_pattern = F.mse_loss(g_feats['relu3_1'], c_feats['relu3_1'])
+        
+        # ---------------------------------------------------------------------
+        # Final Weighted Sum (Now includes LPIPS and Color!)
+        # ---------------------------------------------------------------------
+        total_loss = (self.lambda_structure * loss_structure) + \
+                     (self.lambda_pattern * loss_pattern) + \
+                     (self.lambda_edge * loss_edge) + \
+                     (self.lambda_lpips * loss_lpips) + \
+                     (self.lambda_color * loss_color)
+        
+        # Metrics for logging
+        metrics['eye_loss'] = total_loss.item()
+        metrics['num_eyes'] = len(content_eyes)
+        
+        return total_loss, metrics
 
 
 # ============================================================================

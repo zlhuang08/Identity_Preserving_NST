@@ -497,7 +497,7 @@ def train_epoch(model, dataloader, optimizer, device, content_weight=1.0, style_
         
         if eye_weight > 0 and eye_loss_module is not None:
             eye_loss, eye_metrics = eye_loss_module.compute_eye_loss(stylized, content)
-            num_eyes = eye_metrics['num_matched_eyes']
+            num_eyes = eye_metrics['num_eyes']  # Total eyes detected
             total_eye_samples += num_eyes
         
         # ========================================
@@ -660,7 +660,7 @@ def validate(model, dataloader, device, content_weight=1.0, style_weight=10.0,
             
             if eye_weight > 0 and eye_loss_module is not None:
                 eye_loss, eye_metrics = eye_loss_module.compute_eye_loss(stylized, content)
-                num_eyes = eye_metrics['num_matched_eyes']
+                num_eyes = eye_metrics['num_eyes']  # Total eyes detected
                 total_eye_samples += num_eyes
             
             # Total weighted loss

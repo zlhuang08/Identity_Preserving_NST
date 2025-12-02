@@ -150,13 +150,14 @@ python data_download_styles.py \
 
 | File | Description | Gender | Included in Test Set |
 |------|-------------|--------|----------------------|
-| `face_00010.jpg` | Young girl with blonde hair | Girl | ✅ Yes |
-| `face_00066.jpg` | Young boy with brown hair | Boy | ✅ Yes |
+| `face_00016.jpg` | Young adult with clear features | Female | ❌ No |
+| `face_00066.jpg` | Young adult with natural lighting | Male | ✅ Yes |
 
 **Why these two?**
-- **Diverse representation:** One girl, one boy
-- **Good facial features:** Clear eyes, expressive faces
+- **Diverse representation:** Different demographics and features
+- **Good facial features:** Clear eyes, well-defined features, ideal for identity preservation
 - **Consistent quality:** Both are high-quality synthetic faces
+- **Test set coverage:** face_00066 is in test set (ensures consistency with quantitative metrics)
 - **Report-ready:** Used for all comparison grids in final report
 
 **Usage:**

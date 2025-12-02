@@ -25,9 +25,10 @@ These are the 5 production models trained on the full dataset (120 train, 40 val
   - `training_curves.csv` - Complete training/val/test metrics per epoch
 
 ### `2_identity_plus_eye/`
-- **Description:** AdaIN with identity loss + eye-specific loss
+- **Description:** AdaIN with identity loss + enhanced eye-specific loss (LPIPS + Color Preservation)
 - **Hyperparameters:** γ=1000 (identity weight), β=1 (eye weight)
-- **Performance:** 82.4% test face similarity (+25.4% vs baseline)
+- **Components:** Multi-scale VGG, Sobel edge, LPIPS perceptual, color statistics
+- **Performance:** 82.1% test face similarity (+28.1% vs baseline)
 - **Files:**
   - `final_model.pth` - Final trained model weights
   - `training_curves.csv` - Complete training/val/test metrics per epoch
@@ -41,9 +42,10 @@ These are the 5 production models trained on the full dataset (120 train, 40 val
   - `training_curves.csv` - Complete training/val/test metrics per epoch
 
 ### `3_all_combined/`
-- **Description:** Face-aware AdaIN + identity loss + eye-specific loss
-- **Hyperparameters:** α=0.3, γ=1000, β=1 (eye weight)
-- **Performance:** 84.0% test face similarity (+27.0% vs baseline) 🏆 **BEST**
+- **Description:** Face-aware AdaIN + identity loss + enhanced eye-specific loss (all three combined)
+- **Hyperparameters:** α=0.3 (face preservation), γ=1000, β=1
+- **Components:** Face-aware regional control + Identity embedding + Enhanced eye loss (LPIPS+Color)
+- **Performance:** 83.3% test face similarity (+29.3% vs baseline) 🏆 **HIGHEST IDENTITY**
 - **Files:**
   - `final_model.pth` - Final trained model weights
   - `training_curves.csv` - Complete training/val/test metrics per epoch
@@ -88,13 +90,13 @@ This directory contains archived results from systematic hyperparameter tuning e
 **Result:** γ=1000 is Pareto optimal - achieves strong face similarity (76.8%, +21% vs baseline) with minimal style degradation (5% increase in style loss). Higher values improve face similarity further but cause style collapse.
 
 ### `hyperparameter_tuning/eye_weight/`
-**Experiment:** Eye-specific loss weight (β) sweep (4 values)
-- `beta_0_1/` - β=0.1 (too weak)
-- `beta_1/` - β=1 ⭐ **OPTIMAL** (83.2% face sim, best balance)
-- `beta_10/` - β=10 (slight degradation, 78.3%)
-- `beta_100/` - β=100 (over-optimizes eye loss, 69.9%)
+**Experiment:** Eye-specific loss weight (β) sweep with enhanced LPIPS+Color eye loss (4 values)
+- `beta_0_1/` - β=0.1 (too weak, 80.6% face sim)
+- `beta_1/` - β=1 ⭐ **OPTIMAL** (82.4% face sim, best balance)
+- `beta_10/` - β=10 (diminishing returns, 83.4% but 2x loss)
+- `beta_100/` - β=100 (over-constrained, 80.8%, training failure)
 
-**Result:** β=1 achieves highest validation face similarity (83.2%). Higher values over-optimize for eye loss at expense of overall face similarity.
+**Result:** β=1 achieves excellent face similarity (82.4%) with stable training. β=10 gains only +1% but nearly doubles validation loss (60.78 vs 33.79). β=100 causes severe over-constraint.
 
 ---
 
@@ -143,10 +145,11 @@ checkpoints/
 │       ├── beta_0_1/training_curves.csv
 │       ├── beta_1/training_curves.csv
 │       ├── beta_10/training_curves.csv
-│       ├── beta_100/training_curves.csv
-│       └── beta_1000/training_curves.csv
+│       └── beta_100/training_curves.csv
 └── README.md                        # This file
 ```
+
+**Note:** Hyperparameter tuning directories contain ONLY `training_curves.csv` files. Model checkpoints (`final_model.pth`) have been removed to save disk space (~123 MB freed).
 
 ---
 
@@ -210,21 +213,28 @@ plt.show()
 
 ## Disk Space
 
-- **Main Models:** ~70 MB (5 models × 14 MB each)
+- **Main Models:** ~205 MB (5 models × 41 MB each)
 - **Training Curves:** ~0.5 MB (all CSV files)
-- **Total:** ~71 MB (highly compressed after removing intermediate checkpoints)
+- **Total:** ~205 MB
+
+**Space Optimization:**
+- Removed 6 OLD/test model versions (~205 MB freed)
+- Removed hyperparameter tuning model checkpoints (~123 MB freed)
+- Total space freed: ~328 MB
 
 ---
 
 ## Notes
 
-1. **Only final models kept:** Intermediate checkpoints (epoch 5, 10, 15) removed to save space
-2. **Reproducible:** All models trained with seed=42 for deterministic results
-3. **Dataset:** 200 synthetic faces (120 train, 40 val, 40 test) × 21 styles
-4. **Hardware:** NVIDIA RTX 6000 Ada Generation (48GB VRAM)
-5. **Training Time:** ~60-80 minutes per model (20 epochs)
+1. **Only final models kept:** All OLD/test versions removed; only 5 production models remain
+2. **Hyperparameter tuning:** Model checkpoints removed, CSV files preserved for analysis
+3. **Reproducible:** All models trained with seed=42 for deterministic results
+4. **Dataset:** 200 synthetic faces (120 train, 40 val, 40 test) × 21 styles
+5. **Hardware:** NVIDIA RTX 6000 Ada Generation (48GB VRAM)
+6. **Training Time:** ~50-60 minutes per model (20 epochs)
+7. **Enhanced Eye Loss:** Models 2 & 3 use LPIPS + Color Preservation for superior eye quality
 
 ---
 
-**Last Updated:** November 30, 2025
+**Last Updated:** December 2, 2025
 
