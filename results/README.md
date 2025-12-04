@@ -12,17 +12,20 @@ results/
 │
 ├── create_identity_comparison.py           # Generate identity weight comparison grids
 ├── create_model_progression_comparison.py  # Generate model progression grids
+├── create_qualitative_comparison.py        # Generate qualitative comparison grid (4×6)
 ├── create_style_comparison.py              # Generate style weight comparison grids
 ├── plot_eye_weight_tuning.py               # Plot eye weight (β) tuning analysis
-├── plot_identity_weight_tuning.py          # Plot identity weight (γ) U-curve
+├── plot_identity_weight_tuning.py          # Plot identity weight (γ) Pareto trade-off
 ├── plot_learning_curves.py                 # Plot learning rate analysis
 ├── plot_style_weight_tuning.py             # Plot content:style Pareto curve
 │
+├── qualitative_comparison_grid.png         # 4×6 grid for presentation (6.2 MB, 300 DPI)
+│
 ├── model_progression/                       # Progressive model results (323 MB)
-│   ├── 0_baseline/                          # Step 0: AdaIN baseline (42 images)
+│   ├── 0_baseline/                          # Baseline: AdaIN only (42 images)
 │   ├── 1_identity/                          # Step 1: + Identity loss (42 images)
-│   ├── 2_face_aware_plus_identity/          # Step 2: + Face-aware AdaIN (42 images)
-│   ├── 3_all_combined/                      # Step 3: + Eye-specific loss (42 images)
+│   ├── 2_identity_plus_eye/                 # Step 2: + Eye loss (42 images)
+│   ├── 3_all_combined/                      # Step 3: + Face-aware (42 images)
 │   └── comparisons/                         # Progressive comparison grids (42 grids)
 │
 └── hyperparameter_tuning/                   # Hyperparameter analysis (~25 MB)
@@ -40,13 +43,50 @@ results/
 
 | Category | Count | Size | Description |
 |----------|-------|------|-------------|
+| **Qualitative Comparison Grid** | 1 | 6.2 MB | 4×6 grid for presentation (2540×1770, 300 DPI) |
 | **Model Progression Images** | 168 | 7.6 MB | 4 models × 2 faces × 21 styles |
 | **Model Progression Grids** | 42 | 315 MB | 2×3 comparison grids |
 | **Hyperparameter Analysis Plots** | 4 | ~1 MB | Key tuning visualizations |
 | **Identity Comparison Grids** | 10 | 13 MB | Gamma tuning visual comparisons |
 | **Style Comparison Grids** | 10 | 11 MB | Content:Style weight comparisons |
-| **Scripts** | 7 | ~80 KB | Reproducibility scripts |
-| **Total** | 241 files | ~347 MB | Complete results |
+| **Scripts** | 8 | ~90 KB | Reproducibility scripts |
+| **Total** | 243 files | ~354 MB | Complete results |
+
+---
+
+## 🎨 Qualitative Comparison Grid
+
+### **qualitative_comparison_grid.png** (6.2 MB, 300 DPI)
+
+**High-resolution 4×6 grid designed for presentation and publication.**
+
+#### Grid Layout:
+
+**Rows (4):** Representative content-style combinations
+- Row 1: face_00016 + durer_hare (with subtitles)
+- Row 2: face_00016 + starry_night
+- Row 3: face_00066 + durer_hare
+- Row 4: face_00066 + the_scream
+
+**Columns (6):** Progressive model improvements
+1. Content image (original face)
+2. Style image (art reference)
+3. Baseline (AdaIN only)
+4. + Identity Loss (γ=1000)
+5. + Eye Loss (β=1, enhanced with LPIPS+Color)
+6. + Face-Aware (all three combined)
+
+#### Purpose:
+- **Presentation-ready:** Clean, professional layout with subtitles only on first row
+- **Print quality:** 300 DPI resolution (2540×1770 pixels)
+- **Comprehensive:** Shows 4 diverse content-style combinations
+- **Progressive narrative:** Demonstrates incremental improvements from left to right
+
+#### Generation:
+```bash
+cd results
+python create_qualitative_comparison.py
+```
 
 ---
 
