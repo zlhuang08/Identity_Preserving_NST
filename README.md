@@ -1,6 +1,6 @@
-# Identity-Preserving Fast Style Transfer
+# Identity-Preserving Neural Style Transfer
 
-**Identity preserving NST**
+**Identity-Preserving Neural Style Transfer**
 
 A comprehensive approach to neural style transfer that preserves facial identity through three complementary methods: **Face-Aware AdaIN**, **Identity Loss**, and **Enhanced Eye-Specific Loss**. Achieves **83.1% face similarity** (+26.1% over baseline) while maintaining real-time performance (~0.03-0.13s per image).
 
