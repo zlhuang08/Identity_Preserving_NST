@@ -1,6 +1,6 @@
 # Identity-Preserving Fast Style Transfer
 
-**CS230 Deep Learning Final Project**
+**Identity preserving NST**
 
 A comprehensive approach to neural style transfer that preserves facial identity through three complementary methods: **Face-Aware AdaIN**, **Identity Loss**, and **Enhanced Eye-Specific Loss**. Achieves **83.1% face similarity** (+26.1% over baseline) while maintaining real-time performance (~0.03-0.13s per image).
 
@@ -36,7 +36,7 @@ This project extends AdaIN-based fast style transfer with three identity-preserv
 ## 📂 Project Structure
 
 ```
-cs230_final_project/
+Identity_Preserving_NST/
 ├── README.md                           # Project overview (this file)
 ├── REPORT.md                           # Comprehensive technical report
 ├── LICENSE                             # MIT License
@@ -83,7 +83,7 @@ cs230_final_project/
 ```bash
 # Clone repository
 git clone <repository-url>
-cd cs230_final_project
+cd Identity_Preserving_NST
 
 # Install dependencies
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
